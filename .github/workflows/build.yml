@@ -1,0 +1,34 @@
+# Public CI: proves the SDK + templates build from source on every push/PR.
+# The native core payload is prebuilt (see Releases) and not part of this repo.
+name: build
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Build Flash.Sdk
+        run: dotnet build src/Flash.Sdk/Flash.Sdk.csproj -c Release
+
+      - name: Pack NuGet packages
+        run: |
+          dotnet pack src/Flash.Sdk/Flash.Sdk.csproj -c Release -o artifacts
+          dotnet pack templates/Flash.Templates.csproj -c Release -o artifacts
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuget-packages
+          path: artifacts/*.nupkg
+          if-no-files-found: error

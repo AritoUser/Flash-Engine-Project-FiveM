@@ -1,0 +1,54 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The PUBLIC resource-dev SDK (closed-core split: everything resource authors may
+       see goes here; the native core + .NET host stay private in FlashHost).
+       Contents: resource contracts (IResource/ITickable), generated native wrappers
+       (Flash.Natives.*), events/players/commands/state/db/async/http, handles/Vector3. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>Flash.Sdk</AssemblyName>
+    <!-- Root namespace stays plain "Flash" (not "Flash.Sdk") -> short, memorable types
+         like Flash.Natives.Cfx, Flash.State, Flash.IResource. -->
+    <RootNamespace>Flash</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- Ship the XML docs with the package: resource devs get the /// comments as
+         IntelliSense. Don't enforce CS1591 (missing docs on public members). -->
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+
+    <!-- NuGet metadata: Flash.Sdk is the PUBLIC resource-dev package (MIT). The native
+         core/host stays closed (separate, private repo). Resource devs reference this
+         package ONLY for compilation; at runtime the host provides the shared instance
+         (hence ExcludeAssets=runtime / Private=false in the resource csproj). -->
+    <PackageId>Flash.Sdk</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>Flash-Engine</Authors>
+    <Description>Public C# SDK of Flash-Engine (a FiveM server framework): write server-side resources in modern C# -- events, players, commands, deferrals, state bags, exports, database, natives.</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageTags>fivem;flash-engine;csharp;gamedev;server</PackageTags>
+    <!-- NU1903: concerns the transitive native e_sqlite3 (GHSA-2m69-gcr7-jv3q). The
+         advisory covers ALL currently available e_sqlite3 versions (no patched bundle
+         release yet). We use the newest (2.1.11); exposure is low (the server controls
+         SQL/DB itself, no foreign DB input). TODO: bump once a patched bundle ships. -->
+    <NoWarn>$(NoWarn);NU1903</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The private FlashHost host wires the INTERNAL wiring fields at startup
+         (Native.InvokeNative, State.Set_ ...) from the core contract. They stay
+         internal (hidden from resource devs); FlashHost may see them. -->
+    <InternalsVisibleTo Include="FlashHost" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Database API: SQLite as the first, zero-setup adapter (file-based). The
+         Flash.Db API is kept DB-agnostic; further providers (MySQL/Postgres) follow via
+         config. Microsoft.Data.Sqlite pulls SQLitePCLRaw + the native e_sqlite3. -->
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.0" />
+    <!-- Pin the transitive e_sqlite3 explicitly to the newest bundle. -->
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.11" />
+  </ItemGroup>
+
+</Project>

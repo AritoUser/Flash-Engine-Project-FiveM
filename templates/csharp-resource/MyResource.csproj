@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Your own server-side C# resource for Flash-Engine.
+       Created via `dotnet new flash-resource -n YourName` (everything is then renamed
+       correctly). <AssemblyName> == resource folder name (convention <name>.dll). -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>MyResource</AssemblyName>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Only the public SDK, as a NuGet package. IMPORTANT:
+         ExcludeAssets=runtime + Private=false -> NO DLL is copied to the output
+         (neither Flash.Sdk.dll nor its dependencies such as Microsoft.Data.Sqlite).
+         At runtime the Flash host provides the ONE shared instance; a bundled copy
+         would break type identity. You only compile against the API. -->
+    <PackageReference Include="Flash.Sdk" Version="0.1.0">
+      <ExcludeAssets>runtime</ExcludeAssets>
+      <Private>false</Private>
+    </PackageReference>
+  </ItemGroup>
+
+</Project>

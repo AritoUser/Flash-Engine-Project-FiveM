@@ -1,0 +1,29 @@
+{
+  "$schema": "http://json.schemastore.org/template",
+  "author": "Flash-Engine",
+  "classifications": [ "FiveM", "Server", "C#", "Flash-Engine" ],
+  "identity": "Flash.Resource.CSharp",
+  "name": "Flash-Engine C# Resource",
+  "description": "Server-side FiveM resource in C# against the Flash.Sdk (events, players, state, natives).",
+  "shortName": "flash-resource",
+  "tags": {
+    "language": "C#",
+    "type": "project"
+  },
+  "sourceName": "MyResource",
+  "preferNameDirectory": true,
+  "sources": [
+    {
+      "modifiers": [
+        {
+          "exclude": [
+            "bin/**",
+            "obj/**",
+            "**/*.user",
+            ".template.config/**"
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Questions & ideas (Discussions)
+    url: https://github.com/AritoUser/Flash-Engine-Project-FiveM/discussions
+    about: Please use Discussions for "how do I do X?" questions and feature ideas, not issues.

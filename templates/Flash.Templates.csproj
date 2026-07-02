@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Packages the Flash-Engine `dotnet new` templates as a NuGet package.
+       Usage (end users): `dotnet new install Flash.Templates` -> then
+       `dotnet new flash-resource -n YourName`.
+       This is NOT a normal assembly project: PackageType=Template, no build output,
+       the template content is packed as content/. -->
+  <PropertyGroup>
+    <PackageId>Flash.Templates</PackageId>
+    <Version>0.1.0</Version>
+    <Title>Flash-Engine Templates</Title>
+    <Authors>Flash-Engine</Authors>
+    <Description>dotnet new templates for Flash-Engine: server-side FiveM resources in C# (flash-resource).</Description>
+    <PackageTags>dotnet-new;templates;fivem;flash-engine;csharp</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+
+    <PackageType>Template</PackageType>
+    <TargetFramework>net10.0</TargetFramework>
+    <IncludeContentInPack>true</IncludeContentInPack>
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <ContentTargetFolders>content</ContentTargetFolders>
+    <EnableDefaultItems>false</EnableDefaultItems>
+    <!-- NoDefaultExcludes: NuGet would otherwise exclude the dotfile folder
+         .template.config -> the template would be broken. NU5128: no lib content (expected). -->
+    <NoDefaultExcludes>true</NoDefaultExcludes>
+    <NoWarn>$(NoWarn);NU5128</NoWarn>
+    <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Content Include="csharp-resource\**\*" Exclude="csharp-resource\**\bin\**;csharp-resource\**\obj\**" />
+    <Compile Remove="**\*" />
+  </ItemGroup>
+
+</Project>
