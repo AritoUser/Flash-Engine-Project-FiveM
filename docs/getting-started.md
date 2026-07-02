@@ -29,16 +29,17 @@ From zero to a running server with your own **C# server logic**. Three parts:
 
 ## 1. Install Flash
 
-Download `flash-payload-<version>.zip` from the **Releases** page and extract it — it
-contains the payload (`citizen-scripting-flash.dll` + a `flash\` folder with the .NET
-host) plus the installer. Then, from the extracted folder, install into the FXServer
-artifacts directory (the one with `FXServer.exe` + `components.json`):
+The compiled core ships right in this repository under **`core-payload/`**
+(`citizen-scripting-flash.dll` + a `flash\` folder with the .NET host + the installer).
+Clone or download the repo, then install into the FXServer artifacts directory (the one
+with `FXServer.exe` + `components.json`):
 
 ```powershell
-.\install-flash.ps1 -ServerDir "C:\FXServer\server" -PayloadDir .
+.\core-payload\install-flash.ps1 -ServerDir "C:\FXServer\server" -PayloadDir .\core-payload
 ```
 
-(The installer also lives in this repo at `tools/install-flash.ps1`.)
+(The same payload is attached to every release as `flash-payload-<version>.zip`, if you
+prefer a standalone download.)
 
 The script is **idempotent** and does three things:
 - copies `citizen-scripting-flash.dll` next to the other `citizen-scripting-*.dll`,

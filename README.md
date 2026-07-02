@@ -68,13 +68,15 @@ public sealed class Main : IResource
 ## Quick start
 
 1. **Server:** download the FXServer artifact **pinned in the
-   [release notes](../../releases)** and install the
+   [compatibility matrix](CHANGELOG.md#compatibility-matrix)** and install the
    [.NET 10 runtime](https://dotnet.microsoft.com/download/dotnet/10.0).
-2. **Install Flash:** grab `flash-payload-<version>.zip` from the
-   [Releases](../../releases) page, extract it, then:
+2. **Install Flash:** the compiled core ships right in this repo (`core-payload/`).
+   Clone or download the repository, then:
    ```powershell
-   .\install-flash.ps1 -ServerDir "C:\FXServer\server" -PayloadDir .
+   .\core-payload\install-flash.ps1 -ServerDir "C:\FXServer\server" -PayloadDir .\core-payload
    ```
+   (Same content is also attached to each [release](../../releases) as
+   `flash-payload-<version>.zip`.)
 3. **Your first resource:**
    ```powershell
    dotnet new install Flash.Templates
@@ -89,6 +91,7 @@ Full walkthrough incl. troubleshooting: **[docs/getting-started.md](docs/getting
 ## Repository layout
 
 ```
+├─ core-payload/     the compiled core (binary, ready to install — source is private)
 ├─ src/Flash.Sdk/    the public SDK (source, MIT) — also on NuGet as Flash.Sdk
 ├─ templates/        dotnet new flash-resource (NuGet: Flash.Templates)
 ├─ docs/             getting started · API reference · cookbook
@@ -97,8 +100,9 @@ Full walkthrough incl. troubleshooting: **[docs/getting-started.md](docs/getting
 └─ LICENSE           MIT (SDK/templates/docs/installer)
 ```
 
-The **core payload** (native component + .NET host) is distributed as a binary via
-[Releases](../../releases) — it is not part of this repository.
+The **core payload** (`core-payload/`: native component + .NET host) ships as a
+**binary** — everyone can use it, its source code is private
+(see `core-payload/LICENSE.txt`).
 
 ## Version binding (important)
 
@@ -126,7 +130,8 @@ mismatches in plain text.
 The contents of this repository (`src/`, `templates/`, `docs/`, `tools/`) are licensed
 under **MIT** ([LICENSE](LICENSE)).
 
-The **core payload** (native component + .NET host, distributed via Releases) is
-**proprietary, closed-source software** under its own license (`LICENSE.txt` inside the
-payload zip): use on your own servers is free; modifying, decompiling, reverse
-engineering or redistributing the payload is not permitted.
+The **core payload** (`core-payload/`, also attached to releases) is
+**proprietary, closed-source software** under its own license
+([core-payload/LICENSE.txt](core-payload/LICENSE.txt)): use on your own servers is
+free; modifying, decompiling, reverse engineering or redistributing the payload is not
+permitted.

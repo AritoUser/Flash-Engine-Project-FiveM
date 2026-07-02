@@ -1,0 +1,5 @@
+Flash-Engine payload 0.1.0
+Pinned FXServer artifact: see the release notes / CHANGELOG compatibility matrix.
+
+Install (from this folder):
+  .\install-flash.ps1 -ServerDir "C:\FXServer\server" -PayloadDir .
