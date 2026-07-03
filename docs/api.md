@@ -97,18 +97,29 @@ Commands.Register("give", (src, args, raw) =>
 
 ## Deferrals (connect gate)
 
-Hold the connection process and admit/reject — whitelists, bans, queues:
+Hold the connection process and admit/reject — whitelists, bans, queues. The **async
+overload** is the recommended form for database checks: it defers automatically, a
+return without `Done` admits, and an unhandled exception **rejects** (fail-closed —
+an erroring gate must not wave everyone through):
 
 ```csharp
-Events.OnPlayerConnecting((name, deferrals, src) =>
+Events.OnPlayerConnecting(async (name, deferrals, src) =>
 {
-    deferrals.Defer();
+    string lic = Players.Get(src).IdentifierOfType("license") ?? "";  // read natives before the first await
     deferrals.Update("Checking whitelist …");
-    bool ok = /* DB check via identifiers of Players.Get(src) */;
-    if (ok) deferrals.Done();
-    else    deferrals.Done("You are not whitelisted.");
+    bool ok = (await Db.QueryAsync("SELECT 1 FROM whitelist WHERE license=@p0", lic)).Count > 0;
+    if (!ok) deferrals.Done($"Hey {name}, you are not whitelisted.");
+    // returning without Done() admits the player
 });
 ```
+
+For full manual control (adaptive cards, keeping the deferral beyond the handler)
+use the synchronous overload and drive `Defer`/`Update`/`Done` yourself. `Done` is
+final — further `Done`/`Update` calls are ignored (`deferrals.Completed`).
+
+The bundled `flash-admin` resource already gates connects with DB-backed bans plus an
+optional whitelist: enable with `set flash_whitelist "true"` in `server.cfg` and manage
+entries via the `whitelist add|remove|check <netId|license>` console command.
 
 ## State bags (replicated)
 
@@ -167,21 +178,56 @@ along there; don't fire natives.
 
 ## Db
 
-Parameterized SQL queries (placeholders `@p0, @p1, …` in argument order).
-Default: SQLite file `flash-engine.db` in the server data directory.
+Parameterized SQL queries (placeholders `@p0, @p1, …` in argument order) against a
+configurable provider: **SQLite** (zero-setup default, file `flash-engine.db` in the
+server data directory) or **MySQL/MariaDB** (what production servers run).
+
+Configure in `server.cfg` — no code needed:
+
+```cfg
+set flash_db_provider   "mysql"
+set flash_db_connection "Server=127.0.0.1;Database=flash;User=flash;Password=..."
+```
+
+Use `set`, **not** `sets` — `sets` publishes the value (your DB password!) to the
+public server list. Alternatively configure in code, once in `OnStart`:
 
 ```csharp
-Db.Configure("Data Source=my-server.db");    // optional, once in OnStart
+Db.Configure("Data Source=my-server.db");            // SQLite
+Db.Configure("mysql", "Server=...;Database=...");    // MySQL/MariaDB
+```
 
+```csharp
 Db.Execute("CREATE TABLE IF NOT EXISTS kills (name TEXT, n INTEGER)");
 Db.Execute("UPDATE kills SET n = n + 1 WHERE name = @p0", name);
 long n   = Convert.ToInt64(Db.Scalar("SELECT n FROM kills WHERE name=@p0", name) ?? 0L);
 var rows = Db.Query("SELECT name, n FROM kills ORDER BY n DESC LIMIT 10");
 foreach (var r in rows) Log.Info($"{r["name"]}: {r["n"]}");
+
+long id = Db.Insert("INSERT INTO kills (name, n) VALUES (@p0, 0)", name); // new row id
 ```
 
-Calls are synchronous (they briefly block the script thread) — fine for SQLite; don't
-run big queries every frame.
+**Async variants** (`ExecuteAsync` / `QueryAsync` / `ScalarAsync` / `InsertAsync`) run
+the database work off-thread and resume on the script thread — natives/state stay safe
+after the `await`:
+
+```csharp
+var rows = await Db.QueryAsync("SELECT * FROM accounts WHERE license=@p0", lic);
+long id  = await Db.InsertAsync("INSERT INTO accounts (license) VALUES (@p0)", lic);
+
+// Several statements in ONE transaction (all or nothing) -- for multi-row
+// invariants like a money transfer (debit + credit + audit row):
+await Db.ExecuteBatchAsync(
+    ("UPDATE accounts SET cash = cash - @p0 WHERE id = @p1", new object?[] { 500, fromId }),
+    ("UPDATE accounts SET cash = cash + @p0 WHERE id = @p1", new object?[] { 500, toId }));
+```
+
+Rule of thumb: sync calls are fine for `OnStart`/DDL and SQLite; use the async API in
+per-player or per-frame hot paths — with MySQL a sync query would block the whole
+server frame for a network round-trip. `Db.Provider` (`"sqlite"`/`"mysql"`) lets you
+pick dialect-specific SQL (e.g. `AUTOINCREMENT` vs `AUTO_INCREMENT`) where needed.
+`Db.Insert`/`InsertAsync` is the portable way to get the generated key (`INSERT …
+RETURNING` does not exist on MySQL 8).
 
 ## Async
 

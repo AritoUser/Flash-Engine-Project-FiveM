@@ -1,44 +1,88 @@
 using System;
 using System.Collections.Generic;
-using Microsoft.Data.Sqlite;
+using System.Data.Common;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace Flash;
 
+// =====================================================================================
+//  Database API -- parameterized SQL (@p0, @p1, ...) against a configurable provider.
+//
+//  PROVIDERS (BYO-DB):
+//    - "sqlite" (default): zero-setup, file-based (Microsoft.Data.Sqlite). Perfect for
+//      development/small servers -- works without any config.
+//    - "mysql": MySQL/MariaDB via MySqlConnector (MIT, truly async). What real
+//      production FiveM servers run.
+//    Both go through System.Data.Common (DbConnection/DbCommand) -> ONE code path,
+//    no provider-specific branches in the query logic.
+//
+//  CONFIG (resolution order):
+//    1. Db.Configure(provider, connectionString) in code (wins, e.g. for tests).
+//    2. Convars in server.cfg, read once on first use:
+//         set flash_db_provider   "mysql"
+//         set flash_db_connection "Server=127.0.0.1;Database=flash;User=...;Password=..."
+//       (`set`, NOT `sets` -- `sets` publishes the value to the public server list!)
+//    3. Default: SQLite file "flash-engine.db" in the server data directory.
+//
+//  THREADING:
+//    The sync API (Execute/Query/Scalar/Insert) blocks the script thread -- fine for
+//    OnStart/DDL and SQLite, NOT for per-frame or per-player hot paths on MySQL.
+//    The async API (ExecuteAsync/...) runs the database work on the thread pool and
+//    resumes the caller on the script thread (via the resource's FlashSyncContext,
+//    same mechanism as Async.Delay/Http). Task.Run is deliberate even though ADO has
+//    async calls: Microsoft.Data.Sqlite's "async" methods are synchronous under the
+//    hood and would otherwise block the script thread anyway.
+// =====================================================================================
+
 /// <summary>
 /// Simple database API for resources. Parameterized queries (@p0, @p1, ...) against a
-/// configurable connection string.
-///
-/// FIRST ADAPTER: SQLite (zero-setup, file-based — default "Data Source=flash-engine.db").
-/// The API is deliberately slim/DB-agnostic (Execute/Query/Scalar); further providers
-/// (MySQL/Postgres) will use the same API surface + config (vision: BYO-DB).
+/// configurable provider: SQLite (zero-setup default) or MySQL/MariaDB.
+/// Configure via convars in server.cfg (flash_db_provider / flash_db_connection) or
+/// <see cref="Configure(string, string)"/>. Use the ...Async variants in hot paths --
+/// they don't block the server frame and resume on the script thread.
 /// </summary>
 public static class Db
 {
-    private static string _connectionString = "Data Source=flash-engine.db";
+    private const string DefaultSqliteConnection = "Data Source=flash-engine.db";
 
-    /// <summary>Sets the connection string (e.g. from server config). Default = local
-    /// SQLite file in the server directory.</summary>
-    public static void Configure(string connectionString) => _connectionString = connectionString;
+    // The active provider. Written only on the script thread (Configure/first use);
+    // async operations capture the reference BEFORE hopping to the thread pool.
+    private static DbProvider? _provider;
+
+    /// <summary>Name of the active provider: "sqlite" or "mysql". Lets resources pick
+    /// dialect-specific SQL (e.g. AUTOINCREMENT vs AUTO_INCREMENT) where needed.</summary>
+    public static string Provider => Resolve().Name;
+
+    /// <summary>Sets a SQLite connection string (back-compat overload).</summary>
+    public static void Configure(string connectionString)
+        => Configure("sqlite", connectionString);
+
+    /// <summary>
+    /// Selects the provider ("sqlite" or "mysql") + connection string in code. Optional --
+    /// without a call, the convars flash_db_provider/flash_db_connection decide (or the
+    /// SQLite default). Call in OnStart, before the first query.
+    /// </summary>
+    public static void Configure(string provider, string connectionString)
+        => _provider = Create(provider, connectionString);
+
+    // === Sync API (script thread; fine for OnStart/DDL -- use async in hot paths) ====
 
     /// <summary>Command without a result set (INSERT/UPDATE/DELETE/DDL). Returns affected rows.</summary>
     public static int Execute(string sql, params object?[] args)
     {
-        using var con = new SqliteConnection(_connectionString);
-        con.Open();
-        using var cmd = con.CreateCommand();
-        cmd.CommandText = sql;
-        Bind(cmd, args);
+        var p = Resolve();
+        using var con = p.Open();
+        using var cmd = Prepare(con, sql, args);
         return cmd.ExecuteNonQuery();
     }
 
     /// <summary>Single value (first column of the first row), or null.</summary>
     public static object? Scalar(string sql, params object?[] args)
     {
-        using var con = new SqliteConnection(_connectionString);
-        con.Open();
-        using var cmd = con.CreateCommand();
-        cmd.CommandText = sql;
-        Bind(cmd, args);
+        var p = Resolve();
+        using var con = p.Open();
+        using var cmd = Prepare(con, sql, args);
         object? result = cmd.ExecuteScalar();
         return result is DBNull ? null : result;
     }
@@ -46,13 +90,180 @@ public static class Db
     /// <summary>Multiple rows as a list of column-name → value maps.</summary>
     public static List<Dictionary<string, object?>> Query(string sql, params object?[] args)
     {
-        var rows = new List<Dictionary<string, object?>>();
-        using var con = new SqliteConnection(_connectionString);
-        con.Open();
-        using var cmd = con.CreateCommand();
-        cmd.CommandText = sql;
-        Bind(cmd, args);
+        var p = Resolve();
+        using var con = p.Open();
+        using var cmd = Prepare(con, sql, args);
         using var reader = cmd.ExecuteReader();
+        return ReadAll(reader);
+    }
+
+    /// <summary>
+    /// INSERT that returns the generated id (AUTOINCREMENT/AUTO_INCREMENT key) of the
+    /// new row. Provider-portable: reads the id on the SAME connection right after the
+    /// insert (last_insert_rowid()/LAST_INSERT_ID(); `INSERT ... RETURNING` would not
+    /// work on MySQL 8, and a separate Scalar call would use a different connection).
+    /// </summary>
+    public static long Insert(string sql, params object?[] args)
+    {
+        var p = Resolve();
+        using var con = p.Open();
+        using (var cmd = Prepare(con, sql, args))
+            cmd.ExecuteNonQuery();
+        using var idCmd = Prepare(con, p.LastInsertIdSql, Array.Empty<object?>());
+        return Convert.ToInt64(idCmd.ExecuteScalar());
+    }
+
+    // === Async API (thread pool; the await resumes on the script thread) ============
+
+    /// <summary>Like <see cref="Execute"/>, but without blocking the server frame.</summary>
+    public static Task<int> ExecuteAsync(string sql, params object?[] args)
+    {
+        var p = ResolveForAsync();
+        return Task.Run(async () =>
+        {
+            await using var con = await p.OpenAsync();
+            await using var cmd = Prepare(con, sql, args);
+            return await cmd.ExecuteNonQueryAsync();
+        });
+    }
+
+    /// <summary>Like <see cref="Scalar"/>, but without blocking the server frame.</summary>
+    public static Task<object?> ScalarAsync(string sql, params object?[] args)
+    {
+        var p = ResolveForAsync();
+        return Task.Run(async () =>
+        {
+            await using var con = await p.OpenAsync();
+            await using var cmd = Prepare(con, sql, args);
+            object? result = await cmd.ExecuteScalarAsync();
+            return result is DBNull ? null : result;
+        });
+    }
+
+    /// <summary>Like <see cref="Query"/>, but without blocking the server frame.</summary>
+    public static Task<List<Dictionary<string, object?>>> QueryAsync(string sql, params object?[] args)
+    {
+        var p = ResolveForAsync();
+        return Task.Run(async () =>
+        {
+            await using var con = await p.OpenAsync();
+            await using var cmd = Prepare(con, sql, args);
+            await using var reader = await cmd.ExecuteReaderAsync();
+            return ReadAll(reader);
+        });
+    }
+
+    /// <summary>
+    /// Executes several commands in ONE transaction (all or nothing) without blocking
+    /// the server frame. For multi-row invariants — e.g. a money transfer (debit +
+    /// credit + audit row): a crash between the statements must not create or destroy
+    /// money. Returns the total number of affected rows; on any error everything is
+    /// rolled back and the exception propagates to the caller's await.
+    /// </summary>
+    public static Task<int> ExecuteBatchAsync(params (string Sql, object?[] Args)[] commands)
+    {
+        var p = ResolveForAsync();
+        return Task.Run(async () =>
+        {
+            await using var con = await p.OpenAsync();
+            await using var tx = await con.BeginTransactionAsync();
+            try
+            {
+                int affected = 0;
+                foreach (var (sql, args) in commands)
+                {
+                    await using var cmd = Prepare(con, sql, args);
+                    cmd.Transaction = tx;
+                    affected += await cmd.ExecuteNonQueryAsync();
+                }
+                await tx.CommitAsync();
+                return affected;
+            }
+            catch
+            {
+                await tx.RollbackAsync(); // explizit statt implizit via Dispose -> klare Semantik
+                throw;
+            }
+        });
+    }
+
+    /// <summary>Like <see cref="Insert"/>, but without blocking the server frame.</summary>
+    public static Task<long> InsertAsync(string sql, params object?[] args)
+    {
+        var p = ResolveForAsync();
+        return Task.Run(async () =>
+        {
+            await using var con = await p.OpenAsync();
+            await using (var cmd = Prepare(con, sql, args))
+                await cmd.ExecuteNonQueryAsync();
+            await using var idCmd = Prepare(con, p.LastInsertIdSql, Array.Empty<object?>());
+            return Convert.ToInt64(await idCmd.ExecuteScalarAsync());
+        });
+    }
+
+    // === Internals ===================================================================
+
+    // Resolve the active provider; on first use WITHOUT explicit Configure, read the
+    // convars. Runs on the script thread (all public entry points come through here
+    // before any thread-pool hop) -- natives are safe.
+    private static DbProvider Resolve()
+    {
+        if (_provider != null) return _provider;
+        string provider = global::Flash.Natives.Cfx.GetConvar("flash_db_provider", "sqlite") ?? "sqlite";
+        string conn = global::Flash.Natives.Cfx.GetConvar("flash_db_connection", "") ?? "";
+        if (conn.Length == 0)
+        {
+            if (!provider.Equals("sqlite", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException(
+                    $"flash_db_provider is '{provider}' but flash_db_connection is not set. " +
+                    "Add e.g.:  set flash_db_connection \"Server=127.0.0.1;Database=flash;User=...;Password=...\"");
+            conn = DefaultSqliteConnection;
+        }
+        _provider = Create(provider, conn);
+        Log.Info($"Db: provider '{_provider.Name}' active.");
+        return _provider;
+    }
+
+    // Async entry points additionally require a resource context (like Async.Delay):
+    // without a FlashSyncContext the continuation would resume on a thread-pool thread,
+    // and native/state access after the await would crash the server. A clear error
+    // beats that silent off-thread bug.
+    private static DbProvider ResolveForAsync()
+    {
+        if (SynchronizationContext.Current is not FlashSyncContext)
+            throw new InvalidOperationException(
+                "Call the Db...Async methods only inside a Flash resource (OnStart/OnTick/handlers).");
+        return Resolve();
+    }
+
+    private static DbProvider Create(string provider, string connectionString)
+        => provider.ToLowerInvariant() switch
+        {
+            "sqlite" => new SqliteProvider(connectionString),
+            "mysql" or "mariadb" => new MySqlProvider(connectionString),
+            _ => throw new ArgumentException(
+                $"Unknown DB provider '{provider}' (supported: sqlite, mysql).", nameof(provider)),
+        };
+
+    // Build a command with positional arguments bound as @p0, @p1, ...
+    // (that's how the dev writes them in SQL).
+    private static DbCommand Prepare(DbConnection con, string sql, object?[] args)
+    {
+        var cmd = con.CreateCommand();
+        cmd.CommandText = sql;
+        for (int i = 0; i < args.Length; i++)
+        {
+            var p = cmd.CreateParameter();
+            p.ParameterName = "@p" + i;
+            p.Value = args[i] ?? DBNull.Value;
+            cmd.Parameters.Add(p);
+        }
+        return cmd;
+    }
+
+    private static List<Dictionary<string, object?>> ReadAll(DbDataReader reader)
+    {
+        var rows = new List<Dictionary<string, object?>>();
         while (reader.Read())
         {
             var row = new Dictionary<string, object?>(reader.FieldCount);
@@ -63,15 +274,47 @@ public static class Db
         return rows;
     }
 
-    // Bind positional arguments as @p0, @p1, ... (that's how the dev writes them in SQL).
-    private static void Bind(SqliteCommand cmd, object?[] args)
+    // ---- Provider abstraction: connection factory + the few dialect differences. ----
+    private abstract class DbProvider
     {
-        for (int i = 0; i < args.Length; i++)
+        public abstract string Name { get; }
+        /// <summary>Dialect SQL that returns the auto-increment id of the last INSERT
+        /// on the same connection.</summary>
+        public abstract string LastInsertIdSql { get; }
+        protected abstract DbConnection CreateConnection();
+
+        public DbConnection Open()
         {
-            var p = cmd.CreateParameter();
-            p.ParameterName = "@p" + i;
-            p.Value = args[i] ?? DBNull.Value;
-            cmd.Parameters.Add(p);
+            var con = CreateConnection();
+            con.Open();
+            return con;
         }
+
+        public async Task<DbConnection> OpenAsync()
+        {
+            var con = CreateConnection();
+            await con.OpenAsync();
+            return con;
+        }
+    }
+
+    private sealed class SqliteProvider : DbProvider
+    {
+        private readonly string _connectionString;
+        public SqliteProvider(string connectionString) => _connectionString = connectionString;
+        public override string Name => "sqlite";
+        public override string LastInsertIdSql => "SELECT last_insert_rowid()";
+        protected override DbConnection CreateConnection()
+            => new Microsoft.Data.Sqlite.SqliteConnection(_connectionString);
+    }
+
+    private sealed class MySqlProvider : DbProvider
+    {
+        private readonly string _connectionString;
+        public MySqlProvider(string connectionString) => _connectionString = connectionString;
+        public override string Name => "mysql";
+        public override string LastInsertIdSql => "SELECT LAST_INSERT_ID()";
+        protected override DbConnection CreateConnection()
+            => new MySqlConnector.MySqlConnection(_connectionString);
     }
 }

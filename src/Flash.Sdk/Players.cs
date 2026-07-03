@@ -26,6 +26,11 @@ public readonly struct ServerPlayer
     /// <summary>The player's endpoint (IP).</summary>
     public string Endpoint => global::Flash.Natives.Cfx.GetPlayerEndpoint(Src) ?? "";
 
+    /// <summary>true while the player is connected. Important after an `await` in a
+    /// join/handler path: the player may have dropped in the meantime -- check before
+    /// caching per-player state, otherwise ghost entries survive the drop.</summary>
+    public bool Connected => !string.IsNullOrEmpty(global::Flash.Natives.Cfx.GetPlayerEndpoint(Src));
+
     /// <summary>Current ping in ms.</summary>
     public int Ping => global::Flash.Natives.Cfx.GetPlayerPing(Src);
 

@@ -8,6 +8,7 @@ stable plugin ABI).
 
 | Flash release | Flash.Sdk (NuGet) | Core contract | FXServer artifact (Windows) |
 |---|---|---|---|
+| 0.2.0 | 0.2.0 | v12 | **31689** (`06d4d348c`) |
 | 0.1.0 | 0.1.0 | v12 | **31689** (`06d4d348c`) |
 
 Rules:
@@ -16,6 +17,54 @@ Rules:
   fine (the contract only grows by appending).
 - **Payload ↔ artifact:** pinned exactly. A different artifact version needs a payload
   release built for it.
+
+## [0.2.0] — 2026-07-03
+
+Database + connect-gate release: async DB API with MySQL/MariaDB support, async
+deferrals, money integrity. The native core is unchanged (same core contract v12,
+same FXServer artifact pin) — the payload update is managed-only (host + SDK).
+
+**SDK (`Flash.Sdk`)**
+- `Flash.Db`: async API (`ExecuteAsync`/`QueryAsync`/`ScalarAsync`/`InsertAsync`) —
+  database work runs off-thread, the `await` resumes on the script thread. Calling the
+  async API outside a resource context fails with a clear error (instead of a silent
+  off-thread continuation).
+- `Flash.Db`: MySQL/MariaDB provider (MySqlConnector) next to SQLite; selected via
+  `server.cfg` convars `flash_db_provider` + `flash_db_connection` (or
+  `Db.Configure(provider, connectionString)`). `Db.Provider` exposes the active
+  provider for dialect-specific SQL.
+- `Flash.Db.Insert`/`InsertAsync`: INSERT that returns the generated row id,
+  portable across SQLite and MySQL (same-connection `last_insert_rowid()` /
+  `LAST_INSERT_ID()`).
+- `ServerPlayer.Connected` — check after an `await` in join paths (drop race).
+- `Db.ExecuteBatchAsync` — several statements in ONE transaction (all or nothing),
+  for multi-row invariants like money transfers. Rollback proven live on SQLite
+  and MariaDB/InnoDB.
+- **Async deferrals**: received funcrefs stay valid across ticks (proven live:
+  lua callback invoked from C# after an `await`). New async
+  `Events.OnPlayerConnecting(Func<…, Task>)` overload with a safe contract:
+  auto-defer (incl. the one-tick gap the core wants), return without `Done` =
+  admit, unhandled exception = reject (fail-closed). `Deferrals.Completed`;
+  `Done`/`Update` after the decision are ignored.
+
+**Framework resources**
+- `flash-core`: join load + auto-save are async (no frame blocking with MySQL);
+  drop/stop still save synchronously (continuations no longer run after stop).
+  MySQL schema variant; dirty-flag saves (only changed accounts); money overflow
+  guard; `flashfw:moneyChanged` event; loud warning on weak (ip/netid) identifier
+  fallback.
+- `flash-core` money integrity: **write-through** — money/job changes hit the DB
+  immediately (a crash no longer loses up to 60 s of transactions; the 60 s
+  auto-save remains as a sweeper for failed writes). New `transferMoney` export
+  (atomic player-to-player: funds/overflow checked, both rows + both audit rows
+  in one DB transaction). New `money_log` audit table (ts, player id, account,
+  delta, balance, reason); money exports take an optional reason string
+  (defaults to the calling resource), flash-admin logs `admin:<name>`.
+- `flash-admin`: connect gate is async (bans checked via `Db.QueryAsync` while the
+  connection is deferred) + optional **whitelist** (`set flash_whitelist "true"`,
+  `whitelist add|remove|check <netId|license>` console command, `isWhitelisted`
+  export). MySQL dialect support (DDL, upserts); ban now persists BEFORE the kick;
+  join/audit/ban-list paths async.
 
 ## [0.1.0] — 2026-07-01
 

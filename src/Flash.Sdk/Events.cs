@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Threading.Tasks;
 
 namespace Flash;
 
@@ -85,6 +86,50 @@ public static class Events
                 ? m : new Dictionary<string, object?>();
             handler(name, new Deferrals(map), SourceNetId);
         });
+    }
+
+    /// <summary>
+    /// ASYNC connection gate for playerConnecting — the safe contract for database
+    /// checks (whitelist/bans) via <c>await</c>:
+    ///   - the connection is held automatically (Defer + the one-tick gap the core wants),
+    ///   - reject inside the handler with <c>deferrals.Done(reason)</c>,
+    ///   - returning WITHOUT Done admits the player automatically,
+    ///   - an unhandled exception REJECTS (fail-closed: an erroring gate must not wave
+    ///     everyone through) and is logged.
+    /// For full manual control (adaptive cards, deferral kept beyond the handler) use
+    /// the synchronous overload.
+    /// </summary>
+    public static void OnPlayerConnecting(Func<string, Deferrals, int, Task> handler)
+    {
+        On("playerConnecting", args =>
+        {
+            string name = args.Length > 0 ? args[0]?.ToString() ?? "" : "";
+            var map = (args.Length > 2 && args[2] is IDictionary<string, object?> m)
+                ? m : new Dictionary<string, object?>();
+            // Defer SYNCHRONOUSLY, while the event dispatch still runs -- after the
+            // handler returned, the core would treat the connection as unhandled.
+            var deferrals = new Deferrals(map);
+            deferrals.Defer();
+            _ = RunConnectingGate(handler, name, deferrals, SourceNetId);
+        });
+    }
+
+    private static async Task RunConnectingGate(
+        Func<string, Deferrals, int, Task> handler, string name, Deferrals deferrals, int source)
+    {
+        try
+        {
+            // The core wants >= 1 tick between defer and update/done (known engine quirk;
+            // the lua pattern is `deferrals.defer() Wait(0) ...`).
+            await Async.NextFrame();
+            await handler(name, deferrals, source);
+            deferrals.Done(); // no reject -> admit (no-op if the handler already decided)
+        }
+        catch (Exception e)
+        {
+            Log.Error($"playerConnecting gate for '{name}' threw: {e.Message}");
+            deferrals.Done("Connection check failed. Please try again later.");
+        }
     }
 
     /// <summary>Fires an event with arbitrary arguments onto the server event bus.</summary>

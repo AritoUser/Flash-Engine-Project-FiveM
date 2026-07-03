@@ -52,24 +52,28 @@ Events.On("myshop:buy", args =>
 **Golden rule:** **never** trust the client. Prices, permissions, inventories — validate
 everything on the server; the client only sends wishes and renders results.
 
-## Whitelist on connect (deferrals + DB)
+## Whitelist on connect (async deferrals + DB)
+
+> Tip: the bundled `flash-admin` already ships this (bans + whitelist, enable with
+> `set flash_whitelist "true"`). The recipe below shows how to build your own gate.
 
 ```csharp
 public void OnStart()
 {
     Db.Execute("CREATE TABLE IF NOT EXISTS whitelist (license TEXT PRIMARY KEY)");
 
-    Events.OnPlayerConnecting((name, deferrals, src) =>
+    // Async gate: defers automatically, returning without Done() admits, an
+    // unhandled exception rejects (fail-closed). The DB roundtrip does not
+    // block the server frame -- important with MySQL.
+    Events.OnPlayerConnecting(async (name, deferrals, src) =>
     {
-        deferrals.Defer();
+        string? lic = Players.Get(src).IdentifierOfType("license"); // before the first await
         deferrals.Update("Checking whitelist …");
 
-        string? lic = Players.Get(src).IdentifierOfType("license");
         bool ok = lic != null &&
-            Db.Query("SELECT 1 FROM whitelist WHERE license=@p0", lic).Count > 0;
+            (await Db.QueryAsync("SELECT 1 FROM whitelist WHERE license=@p0", lic)).Count > 0;
 
-        if (ok) deferrals.Done();
-        else    deferrals.Done($"Hey {name}, you are not whitelisted.");
+        if (!ok) deferrals.Done($"Hey {name}, you are not whitelisted.");
     });
 
     Commands.Register("wl", (src, args, raw) =>
@@ -93,9 +97,19 @@ bool ok   = Exports.Call<bool>("flash-core", "removeMoney", netId, "cash", 250);
 Exports.Call("flash-core", "addMoney", netId, "bank", 1000);
 Exports.Call("flash-core", "setJob", netId, "police", 2);
 
+// Atomic player-to-player transfer (checks funds + overflow; false = rejected).
+// Both account rows + both audit rows are written in ONE DB transaction.
+bool sent = Exports.Call<bool>("flash-core", "transferMoney", fromNetId, toNetId, "cash", 500);
+
+// Money ops take an optional reason string -- it ends up in the money_log audit
+// table (ts, player_id, account, delta, balance, reason). Without it, the calling
+// resource's name is logged. Admins query money_log first on dupe reports.
+Exports.Call("flash-core", "addMoney", netId, "cash", 100, "shop:refund");
+
 // React when an account is loaded (after join/restart):
-Events.On("flashfw:playerLoaded", a => { int netId = Convert.ToInt32(a[0]); ... });
-Events.On("flashfw:jobChanged",  a => { /* netId, job, grade */ });
+Events.On("flashfw:playerLoaded",  a => { int netId = Convert.ToInt32(a[0]); ... });
+Events.On("flashfw:jobChanged",    a => { /* netId, job, grade */ });
+Events.On("flashfw:moneyChanged",  a => { /* netId, account, newBalance */ });
 ```
 
 Client-side the balance is readable as replicated state (Lua):

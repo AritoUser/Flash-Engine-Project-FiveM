@@ -6,12 +6,14 @@
   "compilationOptions": {},
   "targets": {
     ".NETCoreApp,Version=v10.0": {
-      "FlashHost/1.0.0": {
+      "Flash.Sdk/0.1.0": {
         "dependencies": {
-          "Flash.Sdk": "0.2.0"
+          "Microsoft.Data.Sqlite": "9.0.0",
+          "MySqlConnector": "2.4.0",
+          "SQLitePCLRaw.bundle_e_sqlite3": "2.1.11"
         },
         "runtime": {
-          "FlashHost.dll": {}
+          "Flash.Sdk.dll": {}
         }
       },
       "Microsoft.Data.Sqlite/9.0.0": {
@@ -212,24 +214,11 @@
             "fileVersion": "2.1.11.2622"
           }
         }
-      },
-      "Flash.Sdk/0.2.0": {
-        "dependencies": {
-          "Microsoft.Data.Sqlite": "9.0.0",
-          "MySqlConnector": "2.4.0",
-          "SQLitePCLRaw.bundle_e_sqlite3": "2.1.11"
-        },
-        "runtime": {
-          "Flash.Sdk.dll": {
-            "assemblyVersion": "0.2.0.0",
-            "fileVersion": "0.2.0.0"
-          }
-        }
       }
     }
   },
   "libraries": {
-    "FlashHost/1.0.0": {
+    "Flash.Sdk/0.1.0": {
       "type": "project",
       "serviceable": false,
       "sha512": ""
@@ -296,11 +285,6 @@
       "sha512": "sha512-Y/0ZkR+r0Cg3DQFuCl1RBnv/tmxpIZRU3HUvelPw6MVaKHwYYR8YNvgs0vuNuXCMvlyJ+Fh88U1D4tah1tt6qw==",
       "path": "sqlitepclraw.provider.e_sqlite3/2.1.11",
       "hashPath": "sqlitepclraw.provider.e_sqlite3.2.1.11.nupkg.sha512"
-    },
-    "Flash.Sdk/0.2.0": {
-      "type": "project",
-      "serviceable": false,
-      "sha512": ""
     }
   }
 }
