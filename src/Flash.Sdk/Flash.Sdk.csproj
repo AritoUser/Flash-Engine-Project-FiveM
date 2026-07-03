@@ -23,16 +23,11 @@
          package ONLY for compilation; at runtime the host provides the shared instance
          (hence ExcludeAssets=runtime / Private=false in the resource csproj). -->
     <PackageId>Flash.Sdk</PackageId>
-    <Version>0.2.0</Version>
+    <Version>0.3.0</Version>
     <Authors>Flash-Engine</Authors>
     <Description>Public C# SDK of Flash-Engine (a FiveM server framework): write server-side resources in modern C# -- events, players, commands, deferrals, state bags, exports, database, natives.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageTags>fivem;flash-engine;csharp;gamedev;server</PackageTags>
-    <!-- NU1903: concerns the transitive native e_sqlite3 (GHSA-2m69-gcr7-jv3q). The
-         advisory covers ALL currently available e_sqlite3 versions (no patched bundle
-         release yet). We use the newest (2.1.11); exposure is low (the server controls
-         SQL/DB itself, no foreign DB input). TODO: bump once a patched bundle ships. -->
-    <NoWarn>$(NoWarn);NU1903</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
@@ -47,12 +42,13 @@
          MySQL/MariaDB for production servers (BYO-DB via convars). Both are driven
          through System.Data.Common -> one query code path in Flash.Db.
          Microsoft.Data.Sqlite pulls SQLitePCLRaw + the native e_sqlite3. -->
-    <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.0" />
-    <!-- Pin the transitive e_sqlite3 explicitly to the newest bundle. -->
-    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.11" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.9" />
+    <!-- Pin the e_sqlite3 bundle explicitly: 3.0.x resolved the long-standing
+         GHSA-2m69-gcr7-jv3q advisory that covered all 2.x bundles (NU1903). -->
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.3" />
     <!-- MySqlConnector (MIT), NOT Oracle's MySql.Data: truly async I/O (MySql.Data
          fakes async), thread-safe pooling, works with MySQL + MariaDB. -->
-    <PackageReference Include="MySqlConnector" Version="2.4.0" />
+    <PackageReference Include="MySqlConnector" Version="2.6.1" />
   </ItemGroup>
 
 </Project>

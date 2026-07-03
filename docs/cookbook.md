@@ -113,7 +113,66 @@ Events.On("flashfw:moneyChanged",  a => { /* netId, account, newBalance */ });
 ```
 
 Client-side the balance is readable as replicated state (Lua):
-`LocalPlayer.state.cash`, `LocalPlayer.state.job`, `LocalPlayer.state.id`.
+`LocalPlayer.state.cash`, `LocalPlayer.state.job`, `LocalPlayer.state.id`,
+`LocalPlayer.state.cid`.
+
+**Two IDs, by design** (multicharacter-ready schema): `id` is the permanent
+*account* id (identity — bans/admin levels key off it), `cid` is the *character*
+id (the save state — money, job, and the `money_log` audit reference it). Until
+character selection ships, every account automatically plays character slot 1,
+so both ids are always present. Modules that store per-player data (inventory,
+housing, …) should key it by `cid` (`Exports.Call<int>("flash-core", "getCid", netId)`).
+
+**Offline access** (admin fines/refunds, rent/tax systems): these exports work
+whether the player is online or not — online they book through the live session,
+offline they update the DB atomically (funds/overflow guards in SQL). They return
+a `Task`, so `await` the export's result:
+
+```csharp
+// Look up an account (works offline; netId is -1 when the player is offline):
+var acc = await Exports.Call<Task<Dictionary<string, object?>?>>(
+    "flash-core", "getAccountByLicense", "license:abc123")!;   // or getAccountById
+int cid = Convert.ToInt32(acc!["cid"]);
+
+bool ok = await Exports.Call<Task<bool>>(
+    "flash-core", "removeMoneyOffline", cid, "cash", 500, "tax:weekly")!;
+await Exports.Call<Task<bool>>("flash-core", "setJobOffline", cid, "unemployed", 0)!;
+```
+
+`flashfw:moneyChanged` only fires for online bookings (it carries a netId);
+offline movements are recorded in `money_log`. From the server console:
+`offlinemoney <add|remove> <license or account id> <amount> [reason]` (flash-admin).
+
+## Jobs as data + societies (job funds)
+
+Jobs live in the database (`jobs` + `job_grades`: label + salary per grade) —
+`setJob` validates against this catalog and returns `false` for unknown
+job/grade combos. An empty catalog is seeded with reference jobs
+(`unemployed`/`police`/`ambulance`); edit them in the DB, then call the
+`reloadJobs` export. Every online player receives their grade's salary on the
+**bank** account each paycheck cycle (`set flash_paycheck_minutes "10"`,
+`0` disables; reason `paycheck:<job>` in `money_log`).
+
+```csharp
+var job = Exports.Call<Dictionary<string, object?>>("flash-core", "getJob", "police");
+bool ok = Exports.Call<bool>("flash-core", "setJob", netId, "police", 2);
+await Exports.Call<Task<bool>>("flash-core", "reloadJobs")!;   // after editing the DB
+```
+
+Each job has a **society** (shared fund — the basis for boss menus). The ops are
+atomic (funds/overflow guards in SQL), audited in `society_log`, and emit
+`flashfw:societyChanged(job, balance)`. WHO may move money is the calling
+module's policy (e.g. check the boss grade) — flash-core provides the mechanics:
+
+```csharp
+long bal = await Exports.Call<Task<long>>("flash-core", "societyGetBalance", "police")!;
+await Exports.Call<Task<bool>>("flash-core", "societyDeposit", "police", 500, "fine:speeding")!;
+await Exports.Call<Task<bool>>("flash-core", "societyWithdraw", "police", 200, "equipment")!;
+
+// Player <-> society (boss menu primitives; compensate automatically on failure):
+await Exports.Call<Task<bool>>("flash-core", "societyDepositFromPlayer", netId, "police", 100, "donation")!;
+await Exports.Call<Task<bool>>("flash-core", "societyWithdrawToPlayer", netId, "police", 100, "bonus")!;
+```
 
 ## Set up flash-admin
 
@@ -128,6 +187,23 @@ the audit log (`admin_log` table); rejected attempts show up as `[SECURITY]` war
 the server log.
 
 Queryable from your own resources: `Exports.Call<int>("flash-admin", "getLevel", netId)`.
+
+## Spawn at the last saved position
+
+`flash-core` samples every online player's position server-side (OneSync) — on
+each auto-save tick and on disconnect — and stores it per character. Its client
+script asks the server where to spawn: rejoining players continue where they
+left; a fresh character (no saved position) uses the spawnmanager's default
+spawn points, as do respawns after death.
+
+Requirements: `spawnmanager` running, and `ensure flash-core` AFTER
+`basic-gamemode` (flash-core takes over the auto-spawn callback — last one
+wins). Server-side, the current position is also queryable:
+
+```csharp
+var pos = Exports.Call<Dictionary<string, object?>>("flash-core", "getPosition", netId);
+// { x, y, z, heading } or null (no ped / never sampled)
+```
 
 ## Discord webhook (server notifications)
 

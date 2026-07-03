@@ -190,6 +190,22 @@ public static class Events
         if (!s_handlers.TryGetValue(resource, out var byEvent)) return;
         if (!byEvent.TryGetValue(eventName, out var list)) return;
 
+        // RATE LIMIT for client events, BEFORE the decode (the expensive part): a mod
+        // menu can spam TriggerServerEvent thousands of times per second. Drops are
+        // silent except once per abuse window (log spam would be its own DoS vector);
+        // sustained flooding kicks the player.
+        switch (RateLimit.Check(source, eventName, out int floodNetId, out bool firstDrop))
+        {
+            case RateLimit.Verdict.Drop:
+                if (firstDrop)
+                    Log.Warn($"[SECURITY] netId {floodNetId} exceeds the rate limit for '{eventName}' -- dropping.");
+                return;
+            case RateLimit.Verdict.Kick:
+                Log.Warn($"[SECURITY] netId {floodNetId} keeps flooding '{eventName}' -> kick.");
+                try { Players.Get(floodNetId).Kick("Event flooding (rate limit exceeded)."); } catch { }
+                return;
+        }
+
         object?[] args;
         try { args = Msgpack.DecodeArray(payload); }
         catch { args = Array.Empty<object?>(); } // a broken payload must not kill the server

@@ -95,6 +95,59 @@ Commands.Register("give", (src, args, raw) =>
 }, restricted: false);   // true -> only with ace permission
 ```
 
+### Rate limiting (client events)
+
+Incoming **client** events are rate-limited per player and event name (token
+bucket, checked before the payload is even decoded) — protection against event
+flooding from mod menus. Server-internal events are never throttled. Defaults
+are generous; tune in `server.cfg`:
+
+```cfg
+set flash_event_rate_limit      "32"   # events/s per (player, event); 0 = off
+set flash_event_rate_burst      "64"   # bucket capacity (short bursts are fine)
+set flash_event_rate_kick_after "500"  # drops within 10s until kick; 0 = never
+```
+
+Drops are logged once per abuse window (`[SECURITY] … exceeds the rate limit`);
+sustained flooding kicks the player. Note FiveM delivers a client event to each
+listening resource separately — limits count per delivery.
+
+## Rpc (request/response)
+
+Events are fire-and-forget; `Flash.Rpc` adds awaitable request/response on top
+(correlation tickets + timeouts). RPC names are a server-wide namespace —
+prefix them with your resource name.
+
+```csharp
+// Answer client calls (sync or async handler):
+Rpc.Register("bank:getBalance", (netId, args) =>
+    Exports.Call<int>("flash-core", "getMoney", netId, Args.Str(args, 0, "cash")));
+Rpc.Register("bank:getHistory", async (netId, args) =>
+    await Db.QueryAsync("SELECT ... WHERE cid=@p0", cid));
+
+// Call INTO a client and await the answer (TimeoutException if it stays silent):
+int hp = await Rpc.Client<int>(netId, "getHealth");
+var r  = await Rpc.ClientWithTimeout<long>(2000, netId, "probe");
+```
+
+Client side (Lua, provided by flash-core's RPC bridge — usable from any client
+resource):
+
+```lua
+-- ask the server (awaits without a callback; wrap in pcall for errors):
+local balance = exports['flash-core']:rpcCall('bank:getBalance', { 'cash' })
+
+-- let the server call into this client:
+exports['flash-core']:rpcRegister('getHealth', function()
+    return GetEntityHealth(PlayerPedId())
+end)
+```
+
+Security: requests are only accepted from real clients, responses only from the
+client the request was sent to (tickets are bound to the netId); handler errors
+reply with a generic failure (details stay in the server log); RPC traffic runs
+through the client-event rate limiter like any other event.
+
 ## Deferrals (connect gate)
 
 Hold the connection process and admit/reject — whitelists, bans, queues. The **async
@@ -120,6 +173,11 @@ final — further `Done`/`Update` calls are ignored (`deferrals.Completed`).
 The bundled `flash-admin` resource already gates connects with DB-backed bans plus an
 optional whitelist: enable with `set flash_whitelist "true"` in `server.cfg` and manage
 entries via the `whitelist add|remove|check <netId|license>` console command.
+
+For production servers, also set `set flash_require_identifier "true"`: connections
+without a cryptographic identifier (license/fivem/discord/steam/live/xbl) are then
+**rejected** at the gate. Without it, such players fall back to ip/netid keys — those
+are not session-stable, so an account or ban could change owners (LAN/dev only).
 
 ## State bags (replicated)
 

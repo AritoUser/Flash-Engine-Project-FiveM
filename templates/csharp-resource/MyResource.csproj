@@ -16,7 +16,7 @@
          (neither Flash.Sdk.dll nor its dependencies such as Microsoft.Data.Sqlite).
          At runtime the Flash host provides the ONE shared instance; a bundled copy
          would break type identity. You only compile against the API. -->
-    <PackageReference Include="Flash.Sdk" Version="0.2.0">
+    <PackageReference Include="Flash.Sdk" Version="0.3.0">
       <ExcludeAssets>runtime</ExcludeAssets>
       <Private>false</Private>
     </PackageReference>
