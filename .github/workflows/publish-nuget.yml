@@ -1,0 +1,47 @@
+name: Publish to NuGet (Trusted Publishing)
+
+# Publishes Flash.Sdk + Flash.Templates to nuget.org via Trusted Publishing (OIDC) --
+# no API key stored anywhere. Runs when a GitHub Release is published, and can be run
+# manually. The nuget.org Trusted Publishing policy must point at:
+#   Repository Owner: AritoUser
+#   Repository:       Flash-Engine-Project-FiveM
+#   Workflow File:    publish-nuget.yml
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write        # REQUIRED: lets the job request the GitHub OIDC token
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Pack
+        run: |
+          dotnet pack src/Flash.Sdk/Flash.Sdk.csproj -c Release -o artifacts
+          dotnet pack templates/Flash.Templates.csproj -c Release -o artifacts
+
+      # Exchanges the GitHub OIDC token for a short-lived nuget.org API key via the
+      # Trusted Publishing policy. 'user' is your nuget.org account (the Package Owner).
+      - name: NuGet trusted-publishing login
+        id: nuget-login
+        uses: NuGet/login@v1
+        with:
+          user: Arito
+
+      - name: Push
+        run: >
+          dotnet nuget push "artifacts/*.nupkg"
+          --source https://api.nuget.org/v3/index.json
+          --api-key ${{ steps.nuget-login.outputs.NUGET_API_KEY }}
+          --skip-duplicate
