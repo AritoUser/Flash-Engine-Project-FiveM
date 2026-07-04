@@ -83,16 +83,24 @@ public static class Args
     public static T? To<T>(object? v)
     {
         if (v is T t) return t;
+        // A null input maps to default(T): null for a nullable/reference T, 0/false for a
+        // non-nullable primitive (unchanged) -- do NOT coerce null through Int()/Float() to 0,
+        // which would wrongly turn To<int?>(null) into 0 instead of null.
+        if (v is null) return default;
+        // Resolve Nullable<T> to its underlying type: a caller asking for int?/double?/... must
+        // still get numbers coerced (msgpack/DB deliver them as long/double). Without this none
+        // of the exact-type checks matched a nullable T, so the method returned null (#153).
+        Type target = Nullable.GetUnderlyingType(typeof(T)) ?? typeof(T);
         object? boxed =
-            typeof(T) == typeof(int) ? Int(v) :
-            typeof(T) == typeof(long) ? Long(v) :
-            typeof(T) == typeof(bool) ? Long(v) != 0 :
-            typeof(T) == typeof(float) ? Float(v) :
-            typeof(T) == typeof(double) ? (double)Float(v) :
-            typeof(T) == typeof(string) ? v?.ToString() :
+            target == typeof(int) ? Int(v) :
+            target == typeof(long) ? Long(v) :
+            target == typeof(bool) ? Long(v) != 0 :
+            target == typeof(float) ? Float(v) :
+            target == typeof(double) ? (double)Float(v) :
+            target == typeof(string) ? v?.ToString() :
             v;
         // double loss-free when the source really was double (Float() would clip it otherwise).
-        if (typeof(T) == typeof(double) && v is double d) boxed = d;
+        if (target == typeof(double) && v is double d) boxed = d;
         return boxed is T c ? c : default;
     }
 

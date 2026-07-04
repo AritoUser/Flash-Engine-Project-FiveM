@@ -120,15 +120,19 @@ public static partial class Commands
             }
 
             string word = args[argIdx++];
-            object? bound = t switch
+            // A nullable primitive param (int?/bool?/… for optional args) has ParameterType
+            // Nullable<T>; match on the UNDERLYING type so it binds like its non-nullable form
+            // instead of falling through to "unsupported" and making the command unusable (#151).
+            Type u = Nullable.GetUnderlyingType(t) ?? t;
+            object? bound = u switch
             {
-                _ when t == typeof(string) => word,
-                _ when t == typeof(int) => int.TryParse(word, NumberStyles.Integer, CultureInfo.InvariantCulture, out var vi) ? vi : null,
-                _ when t == typeof(long) => long.TryParse(word, NumberStyles.Integer, CultureInfo.InvariantCulture, out var vl) ? vl : null,
-                _ when t == typeof(float) => float.TryParse(word, NumberStyles.Float, CultureInfo.InvariantCulture, out var vf) ? vf : null,
-                _ when t == typeof(double) => double.TryParse(word, NumberStyles.Float, CultureInfo.InvariantCulture, out var vd) ? vd : null,
-                _ when t == typeof(bool) => word is "true" or "1" ? true : word is "false" or "0" ? (object?)false : null,
-                _ when t == typeof(ServerPlayer) => int.TryParse(word, out var netId) ? Players.Get(netId) : null,
+                _ when u == typeof(string) => word,
+                _ when u == typeof(int) => int.TryParse(word, NumberStyles.Integer, CultureInfo.InvariantCulture, out var vi) ? vi : null,
+                _ when u == typeof(long) => long.TryParse(word, NumberStyles.Integer, CultureInfo.InvariantCulture, out var vl) ? vl : null,
+                _ when u == typeof(float) => float.TryParse(word, NumberStyles.Float, CultureInfo.InvariantCulture, out var vf) ? vf : null,
+                _ when u == typeof(double) => double.TryParse(word, NumberStyles.Float, CultureInfo.InvariantCulture, out var vd) ? vd : null,
+                _ when u == typeof(bool) => word is "true" or "1" ? true : word is "false" or "0" ? (object?)false : null,
+                _ when u == typeof(ServerPlayer) => int.TryParse(word, out var netId) ? Players.Get(netId) : null,
                 _ => null, // unsupported parameter type
             };
             if (bound == null) return false;

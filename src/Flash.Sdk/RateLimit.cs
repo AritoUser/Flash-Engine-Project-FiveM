@@ -123,11 +123,19 @@ internal static class RateLimit
         s_abuse.Remove(netId);
     }
 
-    /// <summary>Cleanup on disconnect: parses "net:&lt;id&gt;" and frees that player's
-    /// state. Called from the host's single event choke point on playerDropped. (#81)</summary>
+    /// <summary>Cleanup on disconnect: parses the NetID from a GENUINE core drop and frees that
+    /// player's state. Called from the host's single event choke point on playerDropped. (#81)</summary>
     internal static void ClearBySource(string source)
     {
-        if (source.StartsWith("net:", StringComparison.Ordinal) && int.TryParse(source.AsSpan(4), out int netId))
+        // A real disconnect is tagged "internal-net:<id>" by the core; a client-forged
+        // "playerDropped" arrives as "net:<id>". The 0.4.0 code checked the "net:" prefix, so it
+        // (a) never fired on a genuine drop -- the id is "internal-net:", which is NOT prefixed
+        // "net:" -- and (b) DID fire on a forged drop, letting a client reset its own rate-limiter/
+        // abuse counter to evade flood protection. Require internal-net: and take the id after the
+        // last colon. (#147)
+        if (!source.StartsWith("internal-net:", StringComparison.Ordinal)) return;
+        int colon = source.LastIndexOf(':');
+        if (colon >= 0 && int.TryParse(source.AsSpan(colon + 1), out int netId))
             ClearPlayer(netId);
     }
 

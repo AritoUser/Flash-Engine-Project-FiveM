@@ -71,7 +71,14 @@ public static class Async
         // TrySetCanceled posts the continuation through the captured context -> a cancel
         // continuation also runs on the script thread. If the timer fires later anyway,
         // TrySetResult on the already-cancelled TCS is a no-op.
-        cancellationToken.Register(() => tcs.TrySetCanceled(cancellationToken));
+        var reg = cancellationToken.Register(() => tcs.TrySetCanceled(cancellationToken));
+        // Dispose the registration once the delay settles. Without this a LONG-LIVED token
+        // (e.g. player.DropToken(), alive until disconnect) keeps the callback -- and through
+        // it the TCS, its Task and the captured async state machine -- rooted after the delay
+        // completed normally. A per-second `await Delay(ms, dropToken)` loop then leaks one of
+        // each per iteration. ExecuteSynchronously: the cleanup is trivial, no need to schedule. (#149)
+        tcs.Task.ContinueWith(static (_, s) => ((CancellationTokenRegistration)s!).Dispose(),
+            reg, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
         return tcs.Task;
     }
 
@@ -327,11 +334,27 @@ internal sealed class FlashSyncContext : SynchronizationContext
     /// late continuation posted after this is dropped, not re-queued). (#82)</summary>
     public void Clear()
     {
+        List<Action> pending;
         lock (_gate)
         {
             _dead = true;
             _queue.Clear();
+            // Snapshot the pending timer completions, then clear.
+            pending = new List<Action>(_timers.Count);
+            foreach (var (_, complete) in _timers) pending.Add(complete);
             _timers.Clear();
+        }
+
+        // COMPLETE the pending timers (outside the lock) instead of just dropping them. Each is
+        // `() => tcs.TrySetResult()` for a suspended `await Async.Delay(...)`. If left incomplete,
+        // the Task never finishes and its captured async state machine stays rooted -> the
+        // collectible ALC is pinned on every hot-reload. Completing them lets the state machines
+        // release; the continuations they post are DROPPED here because _dead is already set, so
+        // no resource code runs after stop. (#150)
+        foreach (var complete in pending)
+        {
+            try { complete(); }
+            catch { /* a completion callback must not break the unload path */ }
         }
     }
 

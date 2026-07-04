@@ -8,6 +8,7 @@ stable plugin ABI).
 
 | Flash release | Flash.Sdk (NuGet) | Core contract | FXServer artifact (Windows) |
 |---|---|---|---|
+| 0.4.1 | 0.4.1 | v12 | **31689** (`06d4d348c`) |
 | 0.4.0 | 0.4.0 | v12 | **31689** (`06d4d348c`) |
 | 0.3.0 | 0.3.0 | v12 | **31689** (`06d4d348c`) |
 | 0.2.0 | 0.2.0 | v12 | **31689** (`06d4d348c`) |
@@ -19,6 +20,50 @@ Rules:
   fine (the contract only grows by appending).
 - **Payload ↔ artifact:** pinned exactly. A different artifact version needs a payload
   release built for it.
+
+## [0.4.1] — 2026-07-04
+
+Bug-fix release from a focused review of seven reported issues (#147–#153), each verified
+against the code and covered by a build + targeted test. **Managed-only**: the fixes are in
+`Flash.Sdk` and the private host — the native core is unchanged, so the core contract (v12)
+and the FXServer artifact pin (31689) stay the same. A newer SDK on the 0.4.0 payload is fine.
+
+**Security / reliability**
+- Disconnect cleanup now actually runs. The rate-limiter free (#81) and the pending
+  server→client RPC cancellation (#100) were gated on the source starting with `"net:"`, but
+  the core tags a genuine `playerDropped` as `"internal-net:<id>"` — so the checks never matched
+  a real disconnect (state was reclaimed only by the 60 s idle sweep; RPCs hung until timeout, or
+  forever with no timeout). Worse, the old prefix *did* match a client-forged `net:` drop, letting
+  a client reset its own rate-limiter/abuse counter to evade flood protection. Both paths now
+  require the genuine `internal-net:` prefix and parse the NetID after the last colon. (#147)
+- `State.OnChange` dispatch is now thread-safe. The change trampoline can fire on a thread-pool
+  thread (state set off-thread) while `OnChange`/`ClearResource` mutate the handler dictionary on
+  the script thread; the plain `Dictionary` could throw `InvalidOperationException` (collection
+  modified) or corrupt. Access is serialized with a lock and handlers are snapshotted under it and
+  invoked outside it. (#148)
+- `StateBag.Get` guards the msgpack decode. A client-owned bag (player/entity state, strict mode
+  off) can be replicated with malformed bytes; the unguarded decode threw straight into the calling
+  resource (remote crash / DoS). A bad payload is now treated as absent and logged. (#152)
+
+**Memory / lifecycle**
+- `Async.Delay(ms, token)` no longer leaks. The `CancellationTokenRegistration` was never disposed,
+  so a long-lived token (e.g. `player.DropToken()`) kept the callback — and through it the TCS,
+  its Task and the captured async state machine — rooted after the delay completed. A per-second
+  `await Delay(ms, dropToken)` loop leaked one of each per iteration; the registration is now
+  disposed when the delay settles. (#149)
+- Resource unload completes pending delay timers instead of dropping them. `FlashSyncContext.Clear()`
+  cleared `_timers` without completing the tasks, leaving the suspended `await Async.Delay(...)`
+  state machines rooted and pinning the collectible ALC on every hot-reload. Clear now completes
+  them (their continuations are dropped because the context is already dead, so no resource code
+  runs after stop). (#150)
+
+**DX**
+- The command router binds nullable primitive parameters. `[Command]` methods with `int?`/`bool?`/
+  `long?`/… (for optional args) fell through the type switch to "unsupported" and the command was
+  unusable; the switch now resolves `Nullable<T>` to its underlying type. (#151)
+- `Args.To<T>` coerces nullable primitives. `Args.To<int?>(5L)` (and the export/RPC paths built on
+  it) returned `null` instead of `5` because the exact-type checks never matched `Nullable<T>`; it
+  now resolves the underlying type (and maps a null input to `null`, not `0`). (#153)
 
 ## [0.4.0] — 2026-07-04
 

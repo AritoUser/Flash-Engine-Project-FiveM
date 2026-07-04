@@ -53,7 +53,17 @@ public sealed class StateBag
             a[0] = (nuint)bag;
             a[1] = (nuint)k;
             byte[]? raw = global::Flash.Native.InvokeObject(0x637F4C75UL, a); // GET_STATE_BAG_VALUE
-            return raw == null ? null : Msgpack.DecodeValue(raw);
+            if (raw == null) return null;
+            // Guard the decode: a client-owned bag (player/entity state) can be replicated with
+            // MALFORMED msgpack by a cheater (mod menu) when strict mode is off. An unguarded
+            // decode would throw (EOF/bad header) straight into the calling resource and crash
+            // it -- a remote DoS. Treat a bad payload as "absent" and log it. (#152)
+            try { return Msgpack.DecodeValue(raw); }
+            catch (Exception ex)
+            {
+                Log.Warn($"[SECURITY] malformed state-bag msgpack for '{_bagName}'/'{key}' -- ignored ({ex.Message}).");
+                return null;
+            }
         }
         finally { Marshal.FreeCoTaskMem(bag); Marshal.FreeCoTaskMem(k); }
     }

@@ -49,6 +49,11 @@ public static unsafe class State
     private static readonly System.Collections.Generic.Dictionary<string,
         System.Collections.Generic.List<Action<string>>> s_onChange = new();
     private static bool s_subscribed;
+    // Guards s_onChange: setters are thread-safe, so the native change Trampoline can fire on a
+    // thread-pool thread while OnChange/ClearResource mutate the dictionary on the script thread.
+    // A plain Dictionary being read (enumerated) and written concurrently throws
+    // "Collection was modified" or corrupts -> serialize all access. (#148)
+    private static readonly object s_onChangeLock = new();
 
     // --- Setters (typed) -----------------------------------------------------
     // Each type is packed losslessly into the 64 bits: long directly (bit cast), double
@@ -200,12 +205,15 @@ public static unsafe class State
     public static void OnChange(Action<string> handler)
     {
         string res = global::Flash.Natives.Cfx.GetCurrentResourceName() ?? "";
-        if (!s_onChange.TryGetValue(res, out var list))
+        lock (s_onChangeLock)
         {
-            list = new System.Collections.Generic.List<Action<string>>();
-            s_onChange[res] = list;
+            if (!s_onChange.TryGetValue(res, out var list))
+            {
+                list = new System.Collections.Generic.List<Action<string>>();
+                s_onChange[res] = list;
+            }
+            list.Add(handler);
         }
-        list.Add(handler);
         // Register the one native callback with the core only on the FIRST subscriber.
         if (!s_subscribed)
         {
@@ -216,7 +224,10 @@ public static unsafe class State
 
     /// <summary>On resource stop: drop the resource's change handlers so their delegates
     /// don't pin the collectible ALC (called by the host). (#83)</summary>
-    internal static void ClearResource(string resource) => s_onChange.Remove(resource);
+    internal static void ClearResource(string resource)
+    {
+        lock (s_onChangeLock) s_onChange.Remove(resource);
+    }
 
     // The single native entry point the core calls on changes. Converts the UTF-8 key to
     // a string and fans out to every resource's handlers (each isolated -- a throwing
@@ -226,11 +237,24 @@ public static unsafe class State
     {
         string? k = Marshal.PtrToStringUTF8((nint)key);
         if (k == null) return;
-        foreach (var list in s_onChange.Values)
-            foreach (var h in list.ToArray())
-            {
-                try { h(k); }
-                catch (System.Exception ex) { Log.Error($"State.OnChange handler threw: {ex.Message}"); }
-            }
+        // Snapshot the handlers UNDER the lock (this can run on a thread-pool thread), then
+        // invoke them OUTSIDE it -- so a handler that registers/unregisters, or a concurrent
+        // resource load/unload, can't mutate s_onChange mid-enumeration (#148). Each handler
+        // stays isolated: a throwing one must not stop the others or the setter.
+        Action<string>[] handlers;
+        lock (s_onChangeLock)
+        {
+            int n = 0;
+            foreach (var list in s_onChange.Values) n += list.Count;
+            handlers = new Action<string>[n];
+            int i = 0;
+            foreach (var list in s_onChange.Values)
+                for (int j = 0; j < list.Count; j++) handlers[i++] = list[j];
+        }
+        foreach (var h in handlers)
+        {
+            try { h(k); }
+            catch (System.Exception ex) { Log.Error($"State.OnChange handler threw: {ex.Message}"); }
+        }
     }
 }
