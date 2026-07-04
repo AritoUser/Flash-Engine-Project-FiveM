@@ -52,6 +52,29 @@ public static class Async
         return tcs.Task;
     }
 
+    /// <summary>
+    /// Like <see cref="Delay(int)"/>, but cancellable (#6): cancelling makes the await
+    /// throw <see cref="TaskCanceledException"/> instead of blindly resuming — e.g. with
+    /// <see cref="ServerPlayer.DropToken"/> so a countdown dies with the player:
+    /// <c>await Async.Delay(5000, player.DropToken());</c>
+    /// </summary>
+    public static Task Delay(int milliseconds, CancellationToken cancellationToken)
+    {
+        if (!cancellationToken.CanBeCanceled) return Delay(milliseconds);
+        if (milliseconds < 0) milliseconds = 0;
+        if (SynchronizationContext.Current is not FlashSyncContext ctx)
+            throw new InvalidOperationException(
+                "Call Flash.Async.Delay only inside a Flash resource (OnStart/OnTick/handlers).");
+
+        var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        ctx.ScheduleTimer(Environment.TickCount64 + milliseconds, () => tcs.TrySetResult());
+        // TrySetCanceled posts the continuation through the captured context -> a cancel
+        // continuation also runs on the script thread. If the timer fires later anyway,
+        // TrySetResult on the already-cancelled TCS is a no-op.
+        cancellationToken.Register(() => tcs.TrySetCanceled(cancellationToken));
+        return tcs.Task;
+    }
+
     /// <summary>Waits until the next server frame (tick). Useful to spread work across
     /// multiple frames.</summary>
     public static Task NextFrame() => Delay(0);
@@ -76,6 +99,69 @@ public static class Async
         var h = new TimerHandle();
         _ = RunInterval(milliseconds, callback, h);
         return h;
+    }
+
+    /// <summary>
+    /// Real-time scheduling (#13): invokes <paramref name="callback"/> every day at
+    /// <paramref name="hour"/>:<paramref name="minute"/> SERVER-LOCAL time (on the
+    /// script thread) until the handle is disposed. For "payout at 04:00", weekly
+    /// resets etc. — interval loops can't hit wall-clock times.
+    /// </summary>
+    public static IDisposable DailyAt(int hour, int minute, Action callback)
+    {
+        var h = new TimerHandle();
+        _ = RunClock(() => NextDailyDelayMs(DateTime.Now, hour, minute), callback, h);
+        return h;
+    }
+
+    /// <summary>Invokes <paramref name="callback"/> every hour at minute
+    /// <paramref name="minute"/> (server-local, script thread) until disposed.</summary>
+    public static IDisposable HourlyAt(int minute, Action callback)
+    {
+        var h = new TimerHandle();
+        _ = RunClock(() => NextHourlyDelayMs(DateTime.Now, minute), callback, h);
+        return h;
+    }
+
+    // Next daily occurrence: today at hour:minute, or tomorrow if it already passed.
+    // Pure + injectable "now" time -> deterministically testable.
+    internal static long NextDailyDelayMs(DateTime now, int hour, int minute)
+    {
+        var next = new DateTime(now.Year, now.Month, now.Day,
+            Math.Clamp(hour, 0, 23), Math.Clamp(minute, 0, 59), 0, now.Kind);
+        if (next <= now) next = next.AddDays(1);
+        return (long)(next - now).TotalMilliseconds;
+    }
+
+    internal static long NextHourlyDelayMs(DateTime now, int minute)
+    {
+        var next = new DateTime(now.Year, now.Month, now.Day, now.Hour,
+            Math.Clamp(minute, 0, 59), 0, now.Kind);
+        if (next <= now) next = next.AddHours(1);
+        return (long)(next - now).TotalMilliseconds;
+    }
+
+    private static async Task RunClock(Func<long> nextDelayMs, Action cb, TimerHandle h)
+    {
+        while (!h.Cancelled)
+        {
+            // Wait toward the target in 60s chunks, recomputing against the wall clock
+            // each time -- it can jump (NTP correction, DST change); a single 24h wait
+            // would only notice that the next day.
+            while (!h.Cancelled)
+            {
+                long remaining = nextDelayMs();
+                if (remaining <= 1_000)
+                {
+                    await Delay((int)Math.Max(remaining, 1));
+                    break; // target reached
+                }
+                await Delay((int)Math.Min(remaining - 500, 60_000));
+            }
+            if (h.Cancelled) break;
+            cb(); // errors are caught/logged by the scheduler drain
+            await Delay(1_500); // past the target second -> never fire twice
+        }
     }
 
     private static async Task RunTimeout(int ms, Action cb, TimerHandle h)
@@ -160,10 +246,23 @@ internal sealed class FlashSyncContext : SynchronizationContext
     private readonly Queue<(SendOrPostCallback cb, object? state)> _queue = new();
     private readonly List<(long dueMs, Action complete)> _timers = new();
 
+    // Set on unload (Clear): a dead context is never drained again, so late continuations
+    // must be DROPPED rather than enqueued -- otherwise they pin the collectible ALC (#82).
+    private bool _dead;
+
     // Async continuations land here (instead of on a thread-pool thread).
     public override void Post(SendOrPostCallback d, object? state)
     {
-        lock (_gate) _queue.Enqueue((d, state));
+        lock (_gate)
+        {
+            // After the resource unloaded this context is dead and TickResource/Drain will
+            // never run again. A late continuation (e.g. a Db.QueryAsync Task.Run completing
+            // AFTER the resource stopped) would otherwise sit in _queue forever, and its
+            // captured delegate would keep the collectible ALC alive -> memory creep on
+            // repeated restarts. Drop it -- the awaiting code is gone with the resource. (#82)
+            if (_dead) return;
+            _queue.Enqueue((d, state));
+        }
     }
 
     // Send (synchronous) is rare; on the single-thread model, execute directly.
@@ -198,10 +297,20 @@ internal sealed class FlashSyncContext : SynchronizationContext
         if (due != null)
             foreach (var c in due) Run(c);
 
-        // 2) Drain queued continuations. TIMERS scheduled while draining run next frame
-        //    (they were added after the timer phase) -> e.g. `while(true){ await Delay(0); }`
-        //    runs exactly once per frame, no hang.
-        while (true)
+        // 2) Drain queued continuations in a BOUNDED batch. Snapshot the count AFTER the
+        //    timer phase (so THIS frame's timer -> await-continuation handoff still runs
+        //    now), then process only that many. Continuations POSTED WHILE draining wait for
+        //    the next frame. This matters for continuations that re-post themselves straight
+        //    into _queue: `await Task.Yield()` (and any await on a task that completes inline
+        //    on our context) enqueues a new continuation immediately -- an unbounded loop
+        //    would drain it in the same frame forever, hijacking the server thread until the
+        //    FiveM watchdog kills the process. Bounded, `while(true){ await Task.Yield(); }`
+        //    advances one step per frame instead. (#72)
+        //    (Delay(0)/timers already deferred to the next frame via _timers, so their
+        //    once-per-frame behaviour is unchanged.)
+        int batch;
+        lock (_gate) batch = _queue.Count;
+        for (int i = 0; i < batch; i++)
         {
             (SendOrPostCallback cb, object? state) item;
             lock (_gate)
@@ -213,12 +322,14 @@ internal sealed class FlashSyncContext : SynchronizationContext
         }
     }
 
-    /// <summary>Discards all pending continuations/timers -- on resource unload, so
-    /// captured delegates don't keep the collectible ALC alive.</summary>
+    /// <summary>Discards all pending continuations/timers and marks the context dead -- on
+    /// resource unload, so captured delegates don't keep the collectible ALC alive (and any
+    /// late continuation posted after this is dropped, not re-queued). (#82)</summary>
     public void Clear()
     {
         lock (_gate)
         {
+            _dead = true;
             _queue.Clear();
             _timers.Clear();
         }
@@ -227,8 +338,12 @@ internal sealed class FlashSyncContext : SynchronizationContext
     private static void Run(Action a)
     {
         // An error in one continuation must not kill the frame (or the other
-        // continuations) -> execute isolated + log.
+        // continuations) -> execute isolated + log + report to the Diagnostics hook.
         try { a(); }
-        catch (Exception ex) { Log.Error($"Async scheduler: {ex.Message}"); }
+        catch (Exception ex)
+        {
+            Log.Error($"Async scheduler: {ex.Message}");
+            Diagnostics.Report("scheduler", ex);
+        }
     }
 }

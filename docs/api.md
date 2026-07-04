@@ -95,6 +95,33 @@ Commands.Register("give", (src, args, raw) =>
 }, restricted: false);   // true -> only with ace permission
 ```
 
+### Attribute router (typed parameters)
+
+For anything beyond a one-liner, annotate methods with `[Command]` and register
+the object once — parameters are parsed and validated automatically, and a parse
+error replies a generated usage line instead of reaching your handler:
+
+```csharp
+public sealed class AdminCommands
+{
+    [Command("give", Restricted = true)]
+    public void Give(CommandContext ctx, ServerPlayer target, int amount, [Rest] string reason = "")
+    {
+        // target parsed from a netId arg, amount is an int, reason swallows the
+        // rest of the line. Optional params (with a default) may be omitted.
+        Exports.Call("flash-core", "addMoney", target.NetId, "cash", amount, reason);
+        ctx.Reply($"Gave {amount} to #{target.NetId}.");
+    }
+}
+
+Commands.RegisterAll(new AdminCommands());
+```
+
+Supported parameter types: `CommandContext` (injected — caller/raw line/`Reply`),
+`int`/`long`/`float`/`double`/`bool`/`string`, and `ServerPlayer` (from a netId).
+`[Rest]` on the last string captures the remaining line. Async (`Task`) methods
+are awaited safely; handler exceptions are logged and routed to `Diagnostics`.
+
 ### Rate limiting (client events)
 
 Incoming **client** events are rate-limited per player and event name (token
@@ -203,16 +230,24 @@ Synchronous resource↔resource calls **with a return value** (between
 Flash/C# resources only):
 
 ```csharp
-// Provider:
+// Provider (untyped, full object?[] access):
 Exports.Register("addMoney", a => AddMoney(ToInt(a[0]), a[1]?.ToString() ?? "cash", ToInt(a[2])));
+
+// Provider (typed overloads — no manual indexing/casting; args coerced via Args.To<T>):
+Exports.Register<int, string, int, bool>("addMoney", (netId, acc, amount) => AddMoney(netId, acc, amount));
+Exports.Register<int>("playerCount", () => Players.Count);
 
 // Consumer:
 bool ok = Exports.Call<bool>("flash-core", "addMoney", netId, "cash", 100);
 ```
 
-`Call` throws if the resource/export doesn't exist. The handler runs in the **caller's**
-context — irrelevant for synchronous handlers (the normal case); don't register
-`Events.On` inside export handlers.
+`Call` throws if the resource/export doesn't exist. `Call<T>` coerces the return
+value safely (an export returning `int` can be read as `long` etc.). Typed
+`Register<...>` overloads exist for 0–4 parameters; numbers that arrive as
+`long`/`double` (e.g. from a forwarded msgpack payload) are coerced, and absurd
+values become `default` instead of throwing inside the export. The handler runs
+in the **caller's** context — irrelevant for synchronous handlers (the normal
+case); don't register `Events.On` inside export handlers.
 
 ## State (reactive core store)
 
@@ -233,6 +268,12 @@ State.OnChange(key => { if (key == "phase") ... });   // called on EVERY change
 
 `OnChange` handlers run synchronously on the setter's thread — only read/pass values
 along there; don't fire natives.
+
+> **Script-thread only.** Like natives, `State` is meant to be used from the script thread
+> (OnStart/OnTick/handlers, or an `await`ed continuation — those resume on it). Reading a
+> string/table from a raw `Task.Run(...)` thread *while another thread overwrites the same
+> key* can race the core's copy. Keep state access on the script thread and this cannot
+> happen. See [Threading model](#threading-model--dont-block-on-tasks).
 
 ## Db
 
@@ -298,10 +339,62 @@ await Async.NextFrame();        // until the next tick
 
 IDisposable t = Async.SetTimeout(5000, () => Log.Info("once after 5s"));
 IDisposable i = Async.SetInterval(60_000, SaveAll);   // until i.Dispose()
+
+// Cancellable waits: pair with the player's drop token so countdowns die with
+// the player instead of resuming against an empty session (TaskCanceledException).
+await Async.Delay(30_000, Players.Get(netId).DropToken());
+
+// Wall-clock scheduling (server-local time; interval loops can't hit 04:00):
+IDisposable d = Async.DailyAt(4, 0, RunNightlyPayout);
+IDisposable h = Async.HourlyAt(30, CleanupLoop);
 ```
 
 Event/command handlers may be `async` too. Only callable inside a resource
 (OnStart/OnTick/handlers).
+
+### Threading model — don't block on tasks
+
+Everything runs on the single FiveM **script thread**; an `await` resumes back on it once
+the frame drains. Because of that, **never block the script thread waiting on a Flash
+task** — `.Result`, `.Wait()`, or `.GetAwaiter().GetResult()` on a `Db`/`Http`/`Async`
+task will **deadlock the server**: the task's continuation needs the script thread to
+resume, but you're holding that thread hostage waiting for the task. The FiveM watchdog
+then kills the process. Always `await` instead:
+
+```csharp
+var rows = await Db.QueryAsync("SELECT ...");   // correct
+var rows = Db.QueryAsync("SELECT ...").Result;  // WRONG — deadlocks the server
+```
+
+Likewise, don't touch natives, `State`, or state bags from a raw `Task.Run(...)`
+thread-pool thread — those are script-thread-only. Do the work inside the resource (an
+`await`ed continuation is already back on the script thread); the `Db`/`Http` async APIs
+handle the thread hop for you.
+
+## Routing buckets (virtual worlds)
+
+Players/entities in different buckets can't see or touch each other — the
+primitive for instanced apartments, mission lobbies, dealer interiors:
+
+```csharp
+int world = RoutingBuckets.Allocate();      // unique instance world (ids from 1000)
+RoutingBuckets.MovePlayer(netId, world);
+RoutingBuckets.MoveEntity(vehicleEntity, world);
+RoutingBuckets.SetLockdownMode(world, "strict"); // server-authoritative entities only
+RoutingBuckets.Release(world);              // players return to world 0
+```
+
+## Diagnostics (error hook)
+
+The framework isolates and logs every handler error — this hook makes them
+programmatically available (Discord/Sentry forwarding):
+
+```csharp
+Diagnostics.OnUnhandled((context, ex) =>   // context e.g. "event:buyItem", "scheduler"
+    _ = Http.Post(webhookUrl, JsonSerializer.Serialize(new { content = $"{context}: {ex.Message}" })));
+```
+
+Log levels are color-coded in the server console (warnings yellow, errors red).
 
 ## Http
 

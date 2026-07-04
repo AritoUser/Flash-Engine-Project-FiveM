@@ -110,6 +110,16 @@ Full API overview: [API reference](api.md) · [`templates/csharp-resource/README
 ensure MyShop
 ```
 
+**Recommended security hardening** (in `server.cfg`, for any production server):
+```cfg
+set sv_stateBagStrictMode true   # revoke client write access to replicated state bags
+                                 # (prevents state-bag overflow network DoS + logic spoofing)
+setr sv_filterRequestControl 2   # reject unauthorized entity-ownership takeover
+                                 # (kills the classic ejector/flinging + delete-gun exploits)
+set flash_require_identifier true  # reject connections without a cryptographic identifier
+set flash_event_rate_limit 32      # per-player client-event rate limit (0 = off)
+```
+
 **Start the server.** The Flash markers appear in the log:
 ```
 [Flash-Engine] citizen:scripting:flash loaded

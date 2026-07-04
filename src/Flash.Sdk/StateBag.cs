@@ -24,8 +24,8 @@ public sealed class StateBag
         // a byte pointer -- the generated SetStateBagValue(string,...) would corrupt
         // binary data.
         byte[] payload = Msgpack.EncodeValue(value);
-        nint bag = Marshal.StringToCoTaskMemUTF8(_bagName);
-        nint k = Marshal.StringToCoTaskMemUTF8(key);
+        nint bag = Marshal.StringToCoTaskMemUTF8(_bagName ?? "");
+        nint k = Marshal.StringToCoTaskMemUTF8(key ?? "");
         try
         {
             fixed (byte* p = payload)
@@ -45,8 +45,8 @@ public sealed class StateBag
     /// <summary>Reads a value (server-side) — or null if not set.</summary>
     public unsafe object? Get(string key)
     {
-        nint bag = Marshal.StringToCoTaskMemUTF8(_bagName);
-        nint k = Marshal.StringToCoTaskMemUTF8(key);
+        nint bag = Marshal.StringToCoTaskMemUTF8(_bagName ?? "");
+        nint k = Marshal.StringToCoTaskMemUTF8(key ?? "");
         try
         {
             Span<nuint> a = stackalloc nuint[2];

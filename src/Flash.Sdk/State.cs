@@ -41,9 +41,13 @@ public static unsafe class State
     // Delete path (v12): remove a key entirely (the core frees the payload).
     internal static delegate* unmanaged<byte*, void> Delete_;
 
-    // The core only knows ONE native callback (trampoline). This event fans it out to
-    // any number of managed C# subscribers.
-    private static event Action<string>? OnChangeHandlers;
+    // Change handlers partitioned PER RESOURCE (key = resource name). Why not a single
+    // static event: the SDK lives in the shared Default ALC, so a static delegate would
+    // survive resource unload -> it pins the collectible ALC and keeps running deleted
+    // code on every state change. ClearResource drops a resource's handlers on unload,
+    // exactly like Events/Exports/Rpc. (#83)
+    private static readonly System.Collections.Generic.Dictionary<string,
+        System.Collections.Generic.List<Action<string>>> s_onChange = new();
     private static bool s_subscribed;
 
     // --- Setters (typed) -----------------------------------------------------
@@ -64,7 +68,7 @@ public static unsafe class State
     /// exist.</summary>
     public static void Delete(string key)
     {
-        nint k = Marshal.StringToCoTaskMemUTF8(key);
+        nint k = Utf8(key);
         try { Delete_((byte*)k); }
         finally { Marshal.FreeCoTaskMem(k); }
     }
@@ -90,8 +94,8 @@ public static unsafe class State
 
     public static void SetString(string key, string value)
     {
-        nint k = Marshal.StringToCoTaskMemUTF8(key);
-        nint v = Marshal.StringToCoTaskMemUTF8(value);
+        nint k = Utf8(key);
+        nint v = Utf8(value);
         try { SetStr_((byte*)k, (byte*)v); }
         finally
         {
@@ -105,7 +109,7 @@ public static unsafe class State
     // null = key missing or not a string.
     public static string? GetString(string key)
     {
-        nint k = Marshal.StringToCoTaskMemUTF8(key);
+        nint k = Utf8(key);
         try
         {
             byte* p = GetStr_((byte*)k);
@@ -134,7 +138,7 @@ public static unsafe class State
     // core (which copies it). 'fixed' pins the span for the duration of the call.
     public static void SetBytes(string key, ReadOnlySpan<byte> value)
     {
-        nint k = Marshal.StringToCoTaskMemUTF8(key);
+        nint k = Utf8(key);
         try
         {
             fixed (byte* p = value)
@@ -147,7 +151,7 @@ public static unsafe class State
     // synchronously, into a managed byte[]. null = key missing or not a byte value.
     public static byte[]? GetBytes(string key)
     {
-        nint k = Marshal.StringToCoTaskMemUTF8(key);
+        nint k = Utf8(key);
         try
         {
             nuint len;
@@ -165,16 +169,20 @@ public static unsafe class State
     // buffer. Centralized here so every setter/getter marshals identically (and
     // leak-free).
 
+    // Null-safe UTF-8 marshalling: a null key/value would become IntPtr.Zero and the
+    // non-nullable native signature would dereference it -> segfault. Coerce to "". (#95)
+    private static nint Utf8(string? s) => Marshal.StringToCoTaskMemUTF8(s ?? "");
+
     private static void SetRaw(string key, byte tag, ulong num)
     {
-        nint k = Marshal.StringToCoTaskMemUTF8(key);
+        nint k = Utf8(key);
         try { Set_((byte*)k, tag, num); }
         finally { Marshal.FreeCoTaskMem(k); }
     }
 
     private static byte GetRaw(string key, out ulong num)
     {
-        nint k = Marshal.StringToCoTaskMemUTF8(key);
+        nint k = Utf8(key);
         try
         {
             ulong local;
@@ -191,7 +199,13 @@ public static unsafe class State
     /// values along in the handler; don't fire natives.</summary>
     public static void OnChange(Action<string> handler)
     {
-        OnChangeHandlers += handler;
+        string res = global::Flash.Natives.Cfx.GetCurrentResourceName() ?? "";
+        if (!s_onChange.TryGetValue(res, out var list))
+        {
+            list = new System.Collections.Generic.List<Action<string>>();
+            s_onChange[res] = list;
+        }
+        list.Add(handler);
         // Register the one native callback with the core only on the FIRST subscriber.
         if (!s_subscribed)
         {
@@ -200,12 +214,23 @@ public static unsafe class State
         }
     }
 
+    /// <summary>On resource stop: drop the resource's change handlers so their delegates
+    /// don't pin the collectible ALC (called by the host). (#83)</summary>
+    internal static void ClearResource(string resource) => s_onChange.Remove(resource);
+
     // The single native entry point the core calls on changes. Converts the UTF-8 key to
-    // a string and fans out to the managed handlers.
+    // a string and fans out to every resource's handlers (each isolated -- a throwing
+    // handler must not stop the others or the setter).
     [UnmanagedCallersOnly]
     private static void Trampoline(byte* key)
     {
         string? k = Marshal.PtrToStringUTF8((nint)key);
-        if (k != null) OnChangeHandlers?.Invoke(k);
+        if (k == null) return;
+        foreach (var list in s_onChange.Values)
+            foreach (var h in list.ToArray())
+            {
+                try { h(k); }
+                catch (System.Exception ex) { Log.Error($"State.OnChange handler threw: {ex.Message}"); }
+            }
     }
 }

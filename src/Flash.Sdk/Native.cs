@@ -19,6 +19,44 @@ public struct Vector3
     public float X;
     public float Y;
     public float Z;
+
+    public Vector3(float x, float y, float z) { X = x; Y = y; Z = z; }
+
+    // --- Math helpers (#35): the everyday spatial toolbox for scripts. ---------------
+
+    public static Vector3 operator +(Vector3 a, Vector3 b) => new(a.X + b.X, a.Y + b.Y, a.Z + b.Z);
+    public static Vector3 operator -(Vector3 a, Vector3 b) => new(a.X - b.X, a.Y - b.Y, a.Z - b.Z);
+    public static Vector3 operator *(Vector3 a, float s) => new(a.X * s, a.Y * s, a.Z * s);
+    public static Vector3 operator /(Vector3 a, float s) => new(a.X / s, a.Y / s, a.Z / s);
+
+    /// <summary>Squared length — prefer this (or <see cref="DistanceSquared"/>) in loops:
+    /// no square root.</summary>
+    public readonly float LengthSquared() => X * X + Y * Y + Z * Z;
+
+    public readonly float Length() => System.MathF.Sqrt(LengthSquared());
+
+    public readonly float Distance(Vector3 other) => (this - other).Length();
+
+    /// <summary>Squared distance — for range checks compare against radius*radius.</summary>
+    public readonly float DistanceSquared(Vector3 other) => (this - other).LengthSquared();
+
+    /// <summary>2D distance (X/Y only) — the usual choice for map ranges, ignores height.</summary>
+    public readonly float Distance2D(Vector3 other)
+    {
+        float dx = X - other.X, dy = Y - other.Y;
+        return System.MathF.Sqrt(dx * dx + dy * dy);
+    }
+
+    public readonly float Dot(Vector3 other) => X * other.X + Y * other.Y + Z * other.Z;
+
+    /// <summary>Unit vector (the zero vector stays zero instead of NaN).</summary>
+    public readonly Vector3 Normalized()
+    {
+        float len = Length();
+        return len > 0f ? this / len : default;
+    }
+
+    public override readonly string ToString() => $"({X:0.##}, {Y:0.##}, {Z:0.##})";
 }
 
 // Internal buffer for Vector3* out params (FiveM scrVector: each float + 4 bytes pad).

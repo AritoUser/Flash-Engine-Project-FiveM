@@ -29,7 +29,10 @@ public static class Args
         bool b => b ? 1 : 0,
         string s => int.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out var p) ? p : def,
         decimal m => m >= int.MinValue && m <= int.MaxValue ? (int)m : def, // DB-Scalars (MySQL DECIMAL)
-        byte or sbyte or short or ushort or uint => Convert.ToInt32(v),
+        // uint SEPARATELY: can be > int.MaxValue (MySQL INT UNSIGNED via MySqlConnector) ->
+        // Convert.ToInt32 would throw and break the "never throws" contract (#85).
+        uint u => u <= int.MaxValue ? (int)u : def,
+        byte or sbyte or short or ushort => Convert.ToInt32(v), // always fit in int32
         _ => def,
     };
 
@@ -54,18 +57,43 @@ public static class Args
 
     /// <summary>args[i] as float; default on missing/invalid (NaN/Infinity count as invalid).</summary>
     public static float Float(object?[] args, int i, float def = 0f)
+        => i >= 0 && i < args.Length ? Float(args[i], def) : def;
+
+    /// <summary>Single value as float; default on invalid (NaN/Infinity count as invalid).</summary>
+    public static float Float(object? v, float def = 0f)
     {
-        if (i < 0 || i >= args.Length) return def;
-        float f = args[i] switch
+        float f = v switch
         {
             float x => x,
             double x => (float)x,
             int x => x,
             long x => x,
+            decimal m => (float)m,
             string s => float.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out var p) ? p : def,
             _ => def,
         };
         return float.IsNaN(f) || float.IsInfinity(f) ? def : f;
+    }
+
+    /// <summary>
+    /// Single value as <typeparamref name="T"/> with safe numeric coercion — msgpack
+    /// and DB layers deliver numbers as long/double/decimal; a plain cast to int/float
+    /// would throw or silently fail. Non-convertible values yield default.
+    /// </summary>
+    public static T? To<T>(object? v)
+    {
+        if (v is T t) return t;
+        object? boxed =
+            typeof(T) == typeof(int) ? Int(v) :
+            typeof(T) == typeof(long) ? Long(v) :
+            typeof(T) == typeof(bool) ? Long(v) != 0 :
+            typeof(T) == typeof(float) ? Float(v) :
+            typeof(T) == typeof(double) ? (double)Float(v) :
+            typeof(T) == typeof(string) ? v?.ToString() :
+            v;
+        // double loss-free when the source really was double (Float() would clip it otherwise).
+        if (typeof(T) == typeof(double) && v is double d) boxed = d;
+        return boxed is T c ? c : default;
     }
 
     /// <summary>args[i] as string; default on missing/null.</summary>

@@ -81,7 +81,7 @@ public static class Rpc
     private static void OnRequest(object?[] args)
     {
         int netId = Events.SourceNetId;
-        if (netId < 0) return; // nur echte Clients (Quelle "net:<id>")
+        if (netId < 0) return; // only real clients (source "net:<id>")
 
         string res = global::Flash.Natives.Cfx.GetCurrentResourceName() ?? "";
         if (!s_handlers.TryGetValue(res, out var byName)) return;
@@ -103,8 +103,8 @@ public static class Rpc
         }
         catch (Exception ex)
         {
-            // Kein Exception-Detail zum Client (Info-Leak); Ursache steht im Server-Log.
-            Log.Error($"RPC-Handler '{name}' warf fuer netId {netId}: {ex.Message}");
+            // No exception detail to the client (info leak); the cause is in the server log.
+            Log.Error($"RPC handler '{name}' threw for netId {netId}: {ex.Message}");
             Events.EmitClient(netId, ResEvent, ticket, false, "rpc handler failed");
         }
     }
@@ -132,13 +132,13 @@ public static class Rpc
         var tcs = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
         s_pending[ticket] = (tcs, netId, res, name);
 
-        // Anfrage raus: [name, ticket, args...] als flaches Event-Argument-Array.
+        // Send the request out: [name, ticket, args...] as a flat event-argument array.
         var payload = new object?[2 + (args?.Length ?? 0)];
         payload[0] = name; payload[1] = ticket;
         if (args != null) Array.Copy(args, 0, payload, 2, args.Length);
         Events.EmitClient(netId, CReqEvent, payload);
 
-        // Timeout ueber den Resource-Scheduler (Script-Thread), Muster wie Flash.Http.
+        // Timeout via the resource scheduler (script thread), same pattern as Flash.Http.
         if (timeoutMs > 0 && Scheduler.Get(res) is { } ctx)
         {
             long t = ticket;
@@ -158,7 +158,7 @@ public static class Rpc
         long ticket = Args.Long(args, 0);
         if (!s_pending.TryGetValue(ticket, out var entry)) return;
 
-        // FORGERY-SCHUTZ: nur der Client, an den die Anfrage ging, darf sie beantworten.
+        // FORGERY GUARD: only the client the request was sent to may answer it.
         if (Events.SourceNetId != entry.NetId) return;
         s_pending.Remove(ticket);
 
@@ -168,23 +168,24 @@ public static class Rpc
             $"RPC '{entry.Name}' failed on client netId {entry.NetId}: {Args.Str(args, 2, "unknown error")}"));
     }
 
-    // msgpack liefert Zahlen als long/double -- fuer die gaengigen Ziel-Typen sicher
-    // konvertieren (Flash.Args), alles andere per Typ-Match.
-    private static T? ConvertResult<T>(object? raw)
+    // msgpack yields numbers as long/double -- convert safely in one place.
+    private static T? ConvertResult<T>(object? raw) => Args.To<T>(raw);
+
+    /// <summary>Disconnect cleanup: immediately aborts all open server→client calls to this
+    /// player (the client will never answer again). Called from the single playerDropped
+    /// choke point (EventBridge) -- without it, tickets would linger until the 5s timeout,
+    /// and forever when called with timeoutMs&lt;=0 (leak + hanging awaiter). TrySetException
+    /// posts the continuation through the captured context. (#100)</summary>
+    internal static void ClearPlayer(int netId)
     {
-        if (raw is T t) return t;
-        object? boxed =
-            typeof(T) == typeof(int) ? Args.Int(raw) :
-            typeof(T) == typeof(long) ? Args.Long(raw) :
-            typeof(T) == typeof(bool) ? Args.Long(raw) != 0 :
-            typeof(T) == typeof(float) ? (float)Args.Long(raw) :
-            typeof(T) == typeof(string) ? raw?.ToString() :
-            raw;
-        // double/float aus msgpack kommen als double -> direkter Cast-Versuch oben,
-        // sonst best effort.
-        if (typeof(T) == typeof(float) && raw is double d) boxed = (float)d;
-        if (typeof(T) == typeof(double) && raw is long l) boxed = (double)l;
-        return boxed is T ct ? ct : default;
+        List<long>? drop = null;
+        foreach (var kv in s_pending)
+            if (kv.Value.NetId == netId) (drop ??= new List<long>()).Add(kv.Key);
+        if (drop == null) return;
+        foreach (var tk in drop)
+            if (s_pending.Remove(tk, out var e))
+                e.Tcs.TrySetException(new OperationCanceledException(
+                    $"RPC '{e.Name}' aborted: client netId {netId} disconnected."));
     }
 
     /// <summary>On resource stop: drop the resource's handlers and open calls (their
@@ -199,6 +200,6 @@ public static class Rpc
         foreach (var kv in s_pending)
             if (kv.Value.Res == resource) (drop ??= new List<long>()).Add(kv.Key);
         if (drop != null)
-            foreach (var tk in drop) s_pending.Remove(tk); // NICHT completen -> Task wird Garbage
+            foreach (var tk in drop) s_pending.Remove(tk); // do NOT complete -> the task becomes garbage
     }
 }

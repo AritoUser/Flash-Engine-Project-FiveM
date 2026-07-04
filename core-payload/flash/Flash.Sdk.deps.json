@@ -6,7 +6,7 @@
   "compilationOptions": {},
   "targets": {
     ".NETCoreApp,Version=v10.0": {
-      "Flash.Sdk/0.2.0": {
+      "Flash.Sdk/0.3.0": {
         "dependencies": {
           "Microsoft.Data.Sqlite": "10.0.9",
           "MySqlConnector": "2.6.1",
@@ -263,7 +263,7 @@
     }
   },
   "libraries": {
-    "Flash.Sdk/0.2.0": {
+    "Flash.Sdk/0.3.0": {
       "type": "project",
       "serviceable": false,
       "sha512": ""

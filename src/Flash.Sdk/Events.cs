@@ -26,14 +26,17 @@ public static class Events
     // GetCurrentResourceName (correct because the host has set the active runtime).
     private static readonly Dictionary<string, Dictionary<string, List<Action<object?[]>>>> s_handlers = new();
 
-    // Source of the currently delivered event (e.g. "net:1" for client events, else ""),
-    // only valid while a handler runs. Save/restore because events can be nested
-    // (a handler emits another event).
-    private static string s_source = "";
+    // Source of the currently delivered event (e.g. "net:1" for client events, else "").
+    // AsyncLocal (not a plain static): the value FLOWS into async handler continuations,
+    // so `Events.Source`/`SourceNetId` stay correct AFTER an `await` -- a plain static
+    // would be restored by the dispatch's finally before the continuation resumes,
+    // returning "" (#92). Save/restore below still handles SYNCHRONOUS nesting.
+    private static readonly System.Threading.AsyncLocal<string> s_source = new();
 
-    /// <summary>Source of the currently running event (only valid inside a handler).
-    /// "net:&lt;id&gt;" for client→server events, "internal-net:&lt;id&gt;" on connect, else "".</summary>
-    public static string Source => s_source;
+    /// <summary>Source of the currently running event. "net:&lt;id&gt;" for client→server
+    /// events, "internal-net:&lt;id&gt;" on connect, else "". Valid inside a handler AND
+    /// after an <c>await</c> within it.</summary>
+    public static string Source => s_source.Value ?? "";
 
     /// <summary>The player NetID of the event source (from "net:&lt;id&gt;"), or -1 if the
     /// event did not come from a client. Handy in client→server handlers.</summary>
@@ -41,11 +44,24 @@ public static class Events
     {
         get
         {
-            string s = s_source;
+            string s = Source;
             int colon = s.LastIndexOf(':');
             return colon >= 0 && int.TryParse(s.AsSpan(colon + 1), out int id) ? id : -1;
         }
     }
+
+    /// <summary>
+    /// True if the running event was triggered by the server CORE, not forged by a client.
+    /// The FiveM core tags its lifecycle events (playerConnecting/playerJoining/playerDropped)
+    /// with source "internal-net:&lt;id&gt;", whereas a client's <c>TriggerServerEvent</c> always
+    /// arrives as "net:&lt;id&gt;" (the source is stamped server-side from the sender's netId and
+    /// cannot be spoofed). Gate trust of lifecycle events on this so a client can't forge a
+    /// drop/join to desync the server's session state (#73). Verified against the pinned
+    /// FXServer source (ServerEventPacketHandler = "net:", GameServer/ClientRegistry/
+    /// InitConnectMethod = "internal-net:").
+    /// </summary>
+    public static bool IsFromCore
+        => Source.StartsWith("internal-net:", StringComparison.Ordinal);
 
     /// <summary>Registers a handler WITH access to the event arguments.</summary>
     public static void On(string eventName, Action<object?[]> handler)
@@ -135,6 +151,7 @@ public static class Events
     /// <summary>Fires an event with arbitrary arguments onto the server event bus.</summary>
     public static unsafe void Emit(string eventName, params object?[] args)
     {
+        eventName ??= ""; // null -> IntPtr.Zero -> native null-deref crash (#95)
         byte[] payload = Msgpack.EncodeArray(args ?? Array.Empty<object?>());
         nint name = Marshal.StringToCoTaskMemUTF8(eventName);
         try
@@ -158,6 +175,7 @@ public static class Events
     /// target = player NetID. The client receives it via RegisterNetEvent/AddEventHandler.</summary>
     public static unsafe void EmitClient(int target, string eventName, params object?[] args)
     {
+        eventName ??= ""; // null -> native null-deref crash (#95)
         byte[] payload = Msgpack.EncodeArray(args ?? Array.Empty<object?>());
         nint name = Marshal.StringToCoTaskMemUTF8(eventName);
         nint tgt = Marshal.StringToCoTaskMemUTF8(target.ToString());
@@ -210,9 +228,10 @@ public static class Events
         try { args = Msgpack.DecodeArray(payload); }
         catch { args = Array.Empty<object?>(); } // a broken payload must not kill the server
 
-        // Source with save/restore (events can be nested).
-        string prevSource = s_source;
-        s_source = source;
+        // Source with save/restore (synchronous nesting: a handler emits another event).
+        // AsyncLocal makes the value ALSO flow into any async handler's continuation.
+        string prevSource = s_source.Value ?? "";
+        s_source.Value = source;
         try
         {
             // Run handlers in the resource's scheduler context → an `await` in an
@@ -225,11 +244,15 @@ public static class Events
                 foreach (var handler in list.ToArray())
                 {
                     try { handler(args); }
-                    catch (Exception e) { Log.Error($"Handler for '{eventName}' threw: {e.Message}"); }
+                    catch (Exception e)
+                    {
+                        Log.Error($"Handler for '{eventName}' threw: {e.Message}");
+                        Diagnostics.Report($"event:{eventName}", e);
+                    }
                 }
             });
         }
-        finally { s_source = prevSource; }
+        finally { s_source.Value = prevSource; }
     }
 
     /// <summary>On resource stop, drop all handlers of the resource (frees captured

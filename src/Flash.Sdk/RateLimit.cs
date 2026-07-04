@@ -110,8 +110,9 @@ internal static class RateLimit
         return Verdict.Drop;
     }
 
-    /// <summary>Frees all buckets/abuse counters of a player (after a kick; dropped
-    /// players are otherwise reclaimed by the idle sweep below).</summary>
+    /// <summary>Frees all buckets/abuse counters of a player (after a kick; also called
+    /// on normal disconnect via <see cref="ClearBySource"/> so a reused NetID cannot
+    /// inherit the previous owner's state).</summary>
     internal static void ClearPlayer(int netId)
     {
         List<(int, string)>? drop = null;
@@ -122,15 +123,30 @@ internal static class RateLimit
         s_abuse.Remove(netId);
     }
 
-    // Every ~4096 checks: evict entries idle for >60s (player left or went quiet).
+    /// <summary>Cleanup on disconnect: parses "net:&lt;id&gt;" and frees that player's
+    /// state. Called from the host's single event choke point on playerDropped. (#81)</summary>
+    internal static void ClearBySource(string source)
+    {
+        if (source.StartsWith("net:", StringComparison.Ordinal) && int.TryParse(source.AsSpan(4), out int netId))
+            ClearPlayer(netId);
+    }
+
+    // Every ~4096 checks: evict entries idle for >60s (safety net -- normal disconnects
+    // are handled promptly by ClearBySource). Sweeps BOTH buckets and abuse counters.
     private static void MaybeSweep(long nowMs)
     {
         if ((++s_calls & 4095) != 0) return;
-        List<(int, string)>? drop = null;
+        List<(int, string)>? dropB = null;
         foreach (var kv in s_buckets)
-            if (nowMs - kv.Value.LastMs > 60_000) (drop ??= new List<(int, string)>()).Add(kv.Key);
-        if (drop != null)
-            foreach (var k in drop) s_buckets.Remove(k);
+            if (nowMs - kv.Value.LastMs > 60_000) (dropB ??= new List<(int, string)>()).Add(kv.Key);
+        if (dropB != null)
+            foreach (var k in dropB) s_buckets.Remove(k);
+
+        List<int>? dropA = null;
+        foreach (var kv in s_abuse)
+            if (nowMs - kv.Value.WindowStartMs > 60_000) (dropA ??= new List<int>()).Add(kv.Key);
+        if (dropA != null)
+            foreach (var id in dropA) s_abuse.Remove(id);
     }
 
     // Deterministic test hook: fixed config + clean state, no convar reads.

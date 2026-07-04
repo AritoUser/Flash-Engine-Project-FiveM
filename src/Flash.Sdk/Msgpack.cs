@@ -19,6 +19,18 @@ namespace Flash;
 /// </summary>
 internal static class Msgpack
 {
+    // Hard limits against malicious payloads from clients (DoS hardening):
+    //  - depth: recursion is bounded so a deeply nested payload cannot StackOverflow
+    //    (which is UNCATCHABLE and would kill the host process). (#68)
+    //  - array/map counts are validated against the remaining bytes BEFORE allocating,
+    //    so a tiny forged header claiming billions of elements cannot force a giant
+    //    preallocation (OOM). Each array element is >= 1 byte, each map entry >= 2. (#77)
+    private const int MaxDepth = 64;
+
+    /// <summary>Thrown on a malformed/hostile payload; callers treat it like any decode
+    /// failure (empty args), so a bad payload can never crash the server.</summary>
+    private sealed class MsgpackException(string message) : Exception(message);
+
     // === Encode =============================================================
 
     /// <summary>Serializes the argument list as ONE msgpack array (as the bus expects).</summary>
@@ -43,7 +55,7 @@ internal static class Msgpack
     {
         if (data.Length == 0) return null;
         int i = 0;
-        return ReadValue(data, ref i);
+        return ReadValue(data, ref i, 0);
     }
 
     private static void WriteValue(List<byte> b, object? v)
@@ -133,18 +145,19 @@ internal static class Msgpack
     {
         if (data.Length == 0) return Array.Empty<object?>();
         int i = 0;
-        object? v = ReadValue(data, ref i);
+        object? v = ReadValue(data, ref i, 0);
         if (v is object?[] arr) return arr;
         return v == null ? Array.Empty<object?>() : new[] { v };
     }
 
-    private static object? ReadValue(byte[] d, ref int i)
+    private static object? ReadValue(byte[] d, ref int i, int depth)
     {
+        if (depth > MaxDepth) throw new MsgpackException("msgpack nesting too deep");
         byte c = d[i++];
         if (c <= 0x7f) return (long)c;                       // positive fixint
         if (c >= 0xe0) return (long)(sbyte)c;                // negative fixint
-        if (c <= 0x8f) return ReadMap(d, ref i, c & 0x0f);   // fixmap
-        if (c <= 0x9f) return ReadArray(d, ref i, c & 0x0f); // fixarray
+        if (c <= 0x8f) return ReadMap(d, ref i, c & 0x0f, depth);   // fixmap
+        if (c <= 0x9f) return ReadArray(d, ref i, c & 0x0f, depth); // fixarray
         if (c <= 0xbf) return ReadStr(d, ref i, c & 0x1f);   // fixstr
 
         switch (c)
@@ -165,10 +178,10 @@ internal static class Msgpack
             case 0xd9: return ReadStr(d, ref i, d[i++]);                     // str8
             case 0xda: return ReadStr(d, ref i, ReadU16(d, ref i));          // str16
             case 0xdb: return ReadStr(d, ref i, (int)ReadU32(d, ref i));     // str32
-            case 0xdc: return ReadArray(d, ref i, ReadU16(d, ref i));        // array16
-            case 0xdd: return ReadArray(d, ref i, (int)ReadU32(d, ref i));   // array32
-            case 0xde: return ReadMap(d, ref i, ReadU16(d, ref i));          // map16
-            case 0xdf: return ReadMap(d, ref i, (int)ReadU32(d, ref i));     // map32
+            case 0xdc: return ReadArray(d, ref i, ReadU16(d, ref i), depth);        // array16
+            case 0xdd: return ReadArray(d, ref i, (int)ReadU32(d, ref i), depth);   // array32
+            case 0xde: return ReadMap(d, ref i, ReadU16(d, ref i), depth);          // map16
+            case 0xdf: return ReadMap(d, ref i, (int)ReadU32(d, ref i), depth);     // map32
             // Ext types: fixext1/2/4/8/16 + ext8/16/32. Relevant for us = funcref
             // (type 10 remote / 11 local) -> Flash.Funcref; other ext types -> null.
             case 0xd4: return ReadExt(d, ref i, 1);
@@ -200,20 +213,25 @@ internal static class Msgpack
         return s;
     }
 
-    private static object?[] ReadArray(byte[] d, ref int i, int n)
+    private static object?[] ReadArray(byte[] d, ref int i, int n, int depth)
     {
+        // Every element is >= 1 byte -> n cannot exceed the bytes left. Reject a forged
+        // huge count BEFORE allocating (else new object?[n] alone is the OOM). (#77)
+        if (n < 0 || n > d.Length - i) throw new MsgpackException("msgpack array length out of range");
         var arr = new object?[n];
-        for (int k = 0; k < n; k++) arr[k] = ReadValue(d, ref i);
+        for (int k = 0; k < n; k++) arr[k] = ReadValue(d, ref i, depth + 1);
         return arr;
     }
 
-    private static Dictionary<string, object?> ReadMap(byte[] d, ref int i, int n)
+    private static Dictionary<string, object?> ReadMap(byte[] d, ref int i, int n, int depth)
     {
+        // Every entry is a key + value >= 2 bytes -> bound n the same way. (#77)
+        if (n < 0 || (long)n * 2 > d.Length - i) throw new MsgpackException("msgpack map length out of range");
         var map = new Dictionary<string, object?>(n);
         for (int k = 0; k < n; k++)
         {
-            object? key = ReadValue(d, ref i);
-            object? val = ReadValue(d, ref i);
+            object? key = ReadValue(d, ref i, depth + 1);
+            object? val = ReadValue(d, ref i, depth + 1);
             map[key?.ToString() ?? ""] = val;
         }
         return map;

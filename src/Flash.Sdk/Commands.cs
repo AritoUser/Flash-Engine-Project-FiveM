@@ -8,7 +8,7 @@ namespace Flash;
 /// FiveM core (native REGISTER_COMMAND) — the handler is a C# callback the core calls
 /// back through the funcref system (Flash.Funcrefs + IScriptRefRuntime.CallRef).
 /// </summary>
-public static class Commands
+public static partial class Commands
 {
     /// <summary>
     /// Registers a server command. handler(source, args, rawCommand):

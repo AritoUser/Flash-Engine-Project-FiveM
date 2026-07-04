@@ -52,7 +52,21 @@ public static class Db
 
     /// <summary>Name of the active provider: "sqlite" or "mysql". Lets resources pick
     /// dialect-specific SQL (e.g. AUTOINCREMENT vs AUTO_INCREMENT) where needed.</summary>
-    public static string Provider => Resolve().Name;
+    public static string Provider
+    {
+        get
+        {
+            // If not yet resolved, the getter would read convars (natives) -- which is a
+            // hard crash off the script thread. The async methods assert the script
+            // thread before resolving; the public getter must do the same. Once resolved
+            // (normal case after OnStart), this is just a field read and thread-safe. (#94)
+            if (_provider == null && SynchronizationContext.Current is not FlashSyncContext)
+                throw new InvalidOperationException(
+                    "Read Db.Provider first on the script thread (e.g. in OnStart or after a query); " +
+                    "the initial read resolves the provider via convars, which cannot run off-thread.");
+            return Resolve().Name;
+        }
+    }
 
     /// <summary>Sets a SQLite connection string (back-compat overload).</summary>
     public static void Configure(string connectionString)
@@ -182,6 +196,53 @@ public static class Db
             catch
             {
                 await tx.RollbackAsync(); // explizit statt implizit via Dispose -> klare Semantik
+                throw;
+            }
+        });
+    }
+
+    /// <summary>
+    /// Like <see cref="ExecuteBatchAsync"/>, but each command may assert how many rows it
+    /// MUST affect: <c>RequiredAffected &gt;= 0</c> → the statement must affect exactly that
+    /// many rows; <c>&lt; 0</c> → no assertion. If a guarded statement affects a different
+    /// count, the WHOLE transaction is rolled back and the method returns <c>false</c> — a
+    /// CLEAN rejection, not an error (e.g. an "insufficient funds" UPDATE whose WHERE guard
+    /// matched no row). Returns <c>true</c> when everything committed. A real DB error still
+    /// rolls back and propagates to the caller's await.
+    ///
+    /// This makes CONDITIONAL multi-row invariants crash-atomic: the guard (a WHERE clause)
+    /// and every dependent write live in one transaction, so a guard that rejects can never
+    /// half-apply the batch (the classic "debit the player but the second leg no-ops" money
+    /// bug). Use it when a batch mixes guarded UPDATEs with dependent writes.
+    /// </summary>
+    public static Task<bool> ExecuteGuardedBatchAsync(params (string Sql, object?[] Args, int RequiredAffected)[] commands)
+    {
+        var p = ResolveForAsync();
+        return Task.Run(async () =>
+        {
+            await using var con = await p.OpenAsync();
+            await using var tx = await con.BeginTransactionAsync();
+            try
+            {
+                foreach (var (sql, args, required) in commands)
+                {
+                    await using var cmd = Prepare(con, sql, args);
+                    cmd.Transaction = tx;
+                    int affected = await cmd.ExecuteNonQueryAsync();
+                    if (required >= 0 && affected != required)
+                    {
+                        // Guard not satisfied (e.g. a coverage WHERE matched 0 rows) -> discard
+                        // the ENTIRE transaction: no partial apply. Clean rejection.
+                        await tx.RollbackAsync();
+                        return false;
+                    }
+                }
+                await tx.CommitAsync();
+                return true;
+            }
+            catch
+            {
+                await tx.RollbackAsync(); // real DB error -> roll back + rethrow
                 throw;
             }
         });

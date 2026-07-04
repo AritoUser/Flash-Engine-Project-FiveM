@@ -62,6 +62,11 @@ public readonly struct ServerPlayer
     /// <summary>This player's state bag ("player:&lt;netId&gt;"). Replicated values are
     /// readable on the client via LocalPlayer.state. Server-authoritative.</summary>
     public StateBag State => new StateBag($"player:{NetId}");
+
+    /// <summary>A CancellationToken that fires when this player disconnects — pair it
+    /// with <c>Async.Delay(ms, token)</c> so waits die with the player instead of
+    /// resuming against an empty session.</summary>
+    public System.Threading.CancellationToken DropToken() => DropTokens.Get(NetId);
 }
 
 /// <summary>

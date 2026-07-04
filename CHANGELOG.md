@@ -8,6 +8,7 @@ stable plugin ABI).
 
 | Flash release | Flash.Sdk (NuGet) | Core contract | FXServer artifact (Windows) |
 |---|---|---|---|
+| 0.4.0 | 0.4.0 | v12 | **31689** (`06d4d348c`) |
 | 0.3.0 | 0.3.0 | v12 | **31689** (`06d4d348c`) |
 | 0.2.0 | 0.2.0 | v12 | **31689** (`06d4d348c`) |
 | 0.1.0 | 0.1.0 | v12 | **31689** (`06d4d348c`) |
@@ -18,6 +19,140 @@ Rules:
   fine (the contract only grows by appending).
 - **Payload ↔ artifact:** pinned exactly. A different artifact version needs a payload
   release built for it.
+
+## [0.4.0] — 2026-07-04
+
+Security, reliability & economy-integrity release: three verified issue reviews worked
+through end-to-end (crash-atomic society transactions, stale-save and transfer-deadlock
+fixes, scheduler DoS/leak hardening, a state-store use-after-free fix, and a lifecycle-event
+forgery guard), plus new SDK primitives (`Db.ExecuteGuardedBatchAsync`, `Events.IsFromCore`).
+Verified in the real server on SQLite **and** MySQL/MariaDB (both self-tests green) and via
+Zig core unit tests. Unlike 0.2.0/0.3.0 this is **not** managed-only: the native core is
+rebuilt (state-store UAF fix + native-invoker bounds), but the core contract (v12) and the
+FXServer artifact pin (31689) are unchanged.
+
+**Security / reliability pass 2** (from the third issue review — verified against the code)
+- Native invoker hardened against stack smashing: the generated `invokeRaw`/`invokeVec3`
+  clamp the argument count to the 32-slot native context **before** copying into the
+  stack buffer. A call with >32 args could previously overwrite the buffer (the C++ shim
+  already capped the downstream count, but the Zig-side copy ran first). (#102)
+- Server→client RPC calls to a player are cancelled on that player's disconnect
+  (`OperationCanceledException` instead of hanging until the 5 s timeout — or forever
+  when called with no timeout), from the same disconnect choke point as the rate-limiter
+  cleanup. (#100)
+- `flash-admin` self-test cleans up its temporary `selftest:admin` rows in a `finally` —
+  a throwing/failing test no longer leaves admin-level/ban/whitelist rows in the
+  production DB (matches the flash-core fix #87). (#101)
+- `ServerPlayer.DropToken()` for an already-disconnected player returns an
+  already-cancelled token instead of allocating a `CancellationTokenSource` that would
+  never fire or be freed (leak + hanging awaiter). (#104)
+- `flash-core` economy integrity: the auto-save sweeper now identity-checks each
+  snapshotted session against the live one before writing — a player who drops and
+  reconnects (same character) during a save pass can no longer have the stale session
+  overwrite the fresh reconnect state (progress rollback / cash duplication, #86). The
+  atomic `transferMoney` batch retries on a transient DB deadlock/lock-timeout, so an
+  InnoDB deadlock no longer drops the two `money_log` rows while keeping the balances
+  (both now survive together, #79).
+- `flash-core` society↔player transactions are now crash-atomic (#67). Depositing to /
+  withdrawing from a society fund was a compensated saga (book the player, then move the
+  fund) — a hard crash in the one-`await` window could vaporize money. Both now book the
+  player in memory optimistically and persist the player row + the guarded society UPDATE
+  + the audit row in a single transaction; a rejected society guard (overflow/coverage)
+  or a DB error rolls the in-memory booking back. The player's cash and the fund balance
+  move together or not at all.
+
+- Scheduler hardening: the per-frame async drain is now bounded — it processes the
+  continuations queued at the start of the frame and defers any posted while draining to
+  the next frame. A `while (true) { await Task.Yield(); }` loop (or any await that re-posts
+  synchronously) now advances one step per frame instead of hijacking the server thread
+  until the FiveM watchdog kills the process (#72). A resource's sync context is also
+  marked dead on unload, so a database task that completes *after* the resource stopped has
+  its continuation dropped instead of pinning the collectible `AssemblyLoadContext` (memory
+  creep on repeated restarts, #82).
+- Docs: threading model — never block the script thread on a Flash task (`.Result`/`.Wait`
+  deadlocks the server), and keep `State`/native access on the script thread (#96).
+- Core: the reactive `State` store's string/bytes getters now copy the value under the
+  store lock into a per-thread buffer and return a pointer to that, instead of returning a
+  pointer into store-owned memory after releasing the lock. A concurrent set/delete from a
+  thread-pool thread can no longer free the value mid-read (use-after-free). Same C-ABI, so
+  it ships with the next native core build. (#84)
+- Security: lifecycle events are now source-verified. A client can `TriggerServerEvent`
+  a fake `playerJoining`/`playerDropped`, which would let it desync its own server-side
+  session (a base for dupe attempts). `flash-core`/`flash-admin` now act on these only when
+  the event actually came from the server core (`Events.IsFromCore` — source
+  `internal-net:` vs a client's `net:`), which is unspoofable. A genuine drop is always
+  `internal-net:`, so it's never falsely rejected. (#73)
+
+**SDK (`Flash.Sdk`)**
+- `Events.IsFromCore` — true when the running event was triggered by the server core
+  (source `internal-net:`), false for a client-forged one (`net:`). Gate trust of
+  lifecycle events (playerJoining/playerDropped/playerConnecting) with it. (#73)
+- `Db.ExecuteGuardedBatchAsync(params (string Sql, object?[] Args, int RequiredAffected)[])`
+  — like `ExecuteBatchAsync`, but each statement can assert an exact affected-row count;
+  a guarded statement that matches a different number of rows rolls the whole transaction
+  back and returns `false` (a clean rejection, not an error). Makes conditional multi-row
+  invariants (a `WHERE`-guarded UPDATE plus dependent writes) crash-atomic. (#67)
+
+**Security / reliability pass** (from the second issue review — verified against the code)
+- Msgpack decoder hardened against DoS: recursion depth limit (nested payload can no
+  longer StackOverflow → uncatchable host kill, #68) and array/map length validated
+  against the remaining bytes before allocating (forged huge count can no longer force
+  a preallocation OOM, #77).
+- Host bridges cap inbound payloads (16 MiB) before allocating — a single oversized
+  event/ref payload can no longer force a huge LOH allocation (#63).
+- `Args.Int` no longer throws on `uint` > int.MaxValue (MySQL `INT UNSIGNED`); returns
+  default like every other out-of-range case (#85).
+- Null-string guards on native boundaries (`State`, `Events.Emit`/`EmitClient`,
+  `StateBag`) — a null key/name is coerced to "" instead of a native null-deref crash
+  (#95). `Db.Provider` asserts the script thread on first (convar-reading) access
+  instead of crashing off-thread (#94).
+- `Events.Source`/`SourceNetId` now flow through an `AsyncLocal`, so they stay correct
+  **after an `await`** inside a handler (previously reset to empty, #92).
+- `State.OnChange` handlers are partitioned per resource and cleared on unload — they
+  no longer pin the collectible ALC or run after resource stop (#83).
+- Event rate-limiter state is freed on player disconnect (not only on kick), so a
+  reused NetID can't inherit the previous player's drop counter ("NetID poisoning",
+  false-positive kicks) or leak (#81).
+- `flash-admin`: target validation — targeted actions reject NetID `-1`/offline (no
+  more accidental server-wide heal/freeze/warn broadcast, #80), and a hierarchy check
+  stops an actor from acting punitively on an equal-or-higher-ranked admin (#66).
+- `flash-core`: disconnect save wrapped in try/finally (a DB error no longer strands a
+  "zombie session" + bricked NetID, #71); write-through retries with exponential backoff
+  instead of hot-spinning on a persistent DB error (#69); join re-validates the
+  identifier after the async load to block NetID-reuse session hijacking (#78);
+  replicated player state is cleared on disconnect (stale-read window on NetID reuse,
+  #98); the self-test cleans up in a `finally` (#87).
+- Docs: recommended `server.cfg` hardening (`sv_stateBagStrictMode`,
+  `sv_filterRequestControl`, #74/#75) in Getting Started.
+
+**SDK (`Flash.Sdk`) — DX pair**
+- Attribute command router: `[Command]`-annotated methods + `Commands.RegisterAll(obj)`
+  with automatic parameter parsing/validation (int/long/float/double/bool/string,
+  `ServerPlayer` from a netId, injected `CommandContext`, `[Rest]` for the trailing
+  line). Parse errors reply a generated usage line; async handlers awaited safely;
+  handler errors routed to `Diagnostics`. (#12)
+- Typed exports: `Exports.Register<...>` overloads (0–4 params) and safe `Call<T>`
+  coercion — no manual `object?[]` indexing/casting; numbers arriving as `long`/
+  `double` are coerced, absurd values become `default` instead of throwing.
+  Shared numeric coercion via new `Args.To<T>` (also used by `Rpc`). (#10)
+
+**SDK (`Flash.Sdk`) — QoL batch**
+- `Vector3` math: operators, `Length`/`Distance`/`DistanceSquared`/`Distance2D`/
+  `Dot`/`Normalized` (zero vector stays zero). (#35)
+- `RoutingBuckets` — virtual-world manager: `Allocate`/`Release` (unique ids,
+  players return to world 0 on release), `MovePlayer`/`MoveEntity`,
+  `SetLockdownMode`, population toggle. (#36)
+- `Async.Delay(ms, CancellationToken)` + `ServerPlayer.DropToken()` — waits that
+  die with the player (TaskCanceledException) instead of resuming against an
+  empty session. (#6)
+- Wall-clock scheduling: `Async.DailyAt(hour, minute, cb)` and
+  `Async.HourlyAt(minute, cb)` (server-local time, DST/NTP-safe chunked waits,
+  never double-fires). (#13)
+- `Diagnostics.OnUnhandled((context, ex) => …)` — programmatic hook for
+  isolated handler/scheduler errors (Discord/Sentry forwarding); per-resource
+  partitioned, cleaned on unload. (#24)
+- Colored console levels: warnings yellow, errors red, debug cyan (FiveM inline
+  color codes). (#38)
 
 ## [0.3.0] — 2026-07-03
 
