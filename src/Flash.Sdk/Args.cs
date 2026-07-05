@@ -91,22 +91,64 @@ public static class Args
         // still get numbers coerced (msgpack/DB deliver them as long/double). Without this none
         // of the exact-type checks matched a nullable T, so the method returned null (#153).
         Type target = Nullable.GetUnderlyingType(typeof(T)) ?? typeof(T);
-        object? boxed =
-            target == typeof(int) ? Int(v) :
-            target == typeof(long) ? Long(v) :
-            target == typeof(bool) ? Long(v) != 0 :
-            target == typeof(float) ? Float(v) :
-            target == typeof(double) ? (double)Float(v) :
-            target == typeof(string) ? v?.ToString() :
-            v;
-        // double loss-free when the source really was double (Float() would clip it otherwise).
-        if (target == typeof(double) && v is double d) boxed = d;
+        object? boxed = ToType(v, target);
         return boxed is T c ? c : default;
+    }
+
+    /// <summary>
+    /// Non-generic sibling of <see cref="To{T}"/>: coerce <paramref name="v"/> to
+    /// <paramref name="target"/> with the same safe numeric semantics. Used where the
+    /// destination type is only known at runtime (reflection-based DB row mapping,
+    /// typed state-bag reads). Returns null for a null input or a non-convertible value
+    /// (callers treat that as "leave the default / absent"). Never throws.
+    /// </summary>
+    internal static object? ToType(object? v, Type target)
+    {
+        if (v is null) return null;
+        // Nullable<T> destinations coerce to the underlying value type (a boxed int is a
+        // valid value for an int? property/field).
+        target = Nullable.GetUnderlyingType(target) ?? target;
+        // Already the right type (or assignable, e.g. a stored POCO/reference) -> pass through.
+        if (target.IsInstanceOfType(v)) return v;
+        if (target == typeof(int)) return Int(v);
+        if (target == typeof(long)) return Long(v);
+        if (target == typeof(bool)) return Long(v) != 0;
+        if (target == typeof(float)) return Float(v);
+        // double loss-free when the source really was double (Float() would clip it otherwise).
+        if (target == typeof(double)) return v is double d ? d : (double)Float(v);
+        if (target == typeof(string)) return v.ToString();
+        if (target.IsEnum)
+        {
+            try { return v is string es ? Enum.Parse(target, es, ignoreCase: true) : Enum.ToObject(target, Long(v)); }
+            catch { return null; }
+        }
+        // Everything else (decimal, DateTime, short/byte, Guid via string, ...) through the
+        // framework converter, invariant culture. A failed conversion is swallowed to null
+        // to keep the "never throws" contract.
+        try { return System.Convert.ChangeType(v, target, CultureInfo.InvariantCulture); }
+        catch { return null; }
     }
 
     /// <summary>args[i] as string; default on missing/null.</summary>
     public static string Str(object?[] args, int i, string def = "")
         => i >= 0 && i < args.Length ? args[i]?.ToString() ?? def : def;
+
+    /// <summary>
+    /// args[i] as a VALIDATED string: returns the value only if it is at most
+    /// <paramref name="maxLength"/> characters and (when given) fully matches the allow-list
+    /// <paramref name="pattern"/>; otherwise <paramref name="def"/>. Use at the RPC/event
+    /// boundary for user-generated content (names, plates, reasons) to reject injection
+    /// payloads before they are stored or replicated to other players' UI. Never throws;
+    /// a pathological pattern/input times out and is rejected. (#65)
+    /// </summary>
+    public static string StrRegex(object?[] args, int i, int maxLength = int.MaxValue,
+        string? pattern = null, string def = "")
+    {
+        string s = Str(args, i, def);
+        if (s.Length > maxLength) return def;
+        if (pattern != null && !Security.IsMatch(s, pattern)) return def;
+        return s;
+    }
 
     /// <summary>args[i] as bool; default on missing/invalid.</summary>
     public static bool Bool(object?[] args, int i, bool def = false)

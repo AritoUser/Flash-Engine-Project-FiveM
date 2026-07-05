@@ -31,6 +31,11 @@ internal static class DropTokens
             s_byResource[res] = byPlayer = map;
             Events.On("playerDropped", _ =>
             {
+                // Forgery guard: a client can TriggerServerEvent("playerDropped") with its own
+                // stamped netId and would otherwise cancel its OWN drop token while still
+                // connected -- escaping jail/countdown/cooldown tasks bound to it. Only the core
+                // drop ("internal-net:<id>") is trusted (same guarantee as #73/#147). (#168)
+                if (!Events.IsFromCore) return;
                 if (map.Remove(Events.SourceNetId, out var cts))
                 {
                     cts.Cancel(); // posts continuations through the captured context

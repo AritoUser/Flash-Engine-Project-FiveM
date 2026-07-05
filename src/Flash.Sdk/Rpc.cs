@@ -124,6 +124,15 @@ public static class Rpc
     /// <summary>Like <see cref="Client{T}"/> with an explicit timeout in ms.</summary>
     public static async Task<T?> ClientWithTimeout<T>(int timeoutMs, int netId, string name, params object?[] args)
     {
+        // Must run on the script thread: this calls Cfx natives (GetCurrentResourceName,
+        // EmitClient) synchronously before the first await and mutates non-thread-safe registries
+        // (s_pending/s_resWired). From a background Task.Run it would hard-crash FXServer and
+        // corrupt state -- assert up front like Db.ResolveForAsync rather than fail obscurely. (#169)
+        if (System.Threading.SynchronizationContext.Current is not FlashSyncContext)
+            throw new InvalidOperationException(
+                "Rpc.Client/ClientWithTimeout must run on the script thread (inside a resource " +
+                "OnStart/handler). Dispatch background work to the script thread first.");
+
         string res = global::Flash.Natives.Cfx.GetCurrentResourceName() ?? "";
         if (s_resWired.Add(res))
             Events.On(CResEvent, OnClientResponse);

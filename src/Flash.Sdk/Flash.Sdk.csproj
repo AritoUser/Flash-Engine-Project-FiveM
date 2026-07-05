@@ -23,7 +23,7 @@
          package ONLY for compilation; at runtime the host provides the shared instance
          (hence ExcludeAssets=runtime / Private=false in the resource csproj). -->
     <PackageId>Flash.Sdk</PackageId>
-    <Version>0.4.1</Version>
+    <Version>0.5.0</Version>
     <Authors>Flash-Engine</Authors>
     <Description>Public C# SDK of Flash-Engine (a FiveM server framework): write server-side resources in modern C# -- events, players, commands, deferrals, state bags, exports, database, natives.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
@@ -36,6 +36,41 @@
          internal (hidden from resource devs); FlashHost may see them. -->
     <InternalsVisibleTo Include="FlashHost" />
   </ItemGroup>
+
+  <!-- ==== EmmyLua definition generation (#173) ========================================
+       The package ships (a) build/Flash.Sdk.targets, which runs after a consumer resource
+       builds, and (b) the Flash.LuaDefGen tool under tools/luadefgen: together they emit
+       <resource>.d.lua (EmmyLua) from the [FlashExport] methods on every build.
+       The tool project path differs between the private repo (src/dotnet/Flash.Sdk) and
+       the public repo (src/Flash.Sdk) -> probe both. -->
+  <PropertyGroup>
+    <FlashLuaDefGenProject Condition="Exists('$(MSBuildProjectDirectory)\..\..\..\tools\Flash.LuaDefGen\Flash.LuaDefGen.csproj')">$(MSBuildProjectDirectory)\..\..\..\tools\Flash.LuaDefGen\Flash.LuaDefGen.csproj</FlashLuaDefGenProject>
+    <FlashLuaDefGenProject Condition="'$(FlashLuaDefGenProject)' == '' AND Exists('$(MSBuildProjectDirectory)\..\..\tools\Flash.LuaDefGen\Flash.LuaDefGen.csproj')">$(MSBuildProjectDirectory)\..\..\tools\Flash.LuaDefGen\Flash.LuaDefGen.csproj</FlashLuaDefGenProject>
+    <FlashLuaDefGenBin Condition="'$(FlashLuaDefGenProject)' != ''">$([System.IO.Path]::GetDirectoryName('$(FlashLuaDefGenProject)'))\bin\$(Configuration)\net10.0</FlashLuaDefGenBin>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Consumer build hook: buildTransitive/ also reaches projects that get Flash.Sdk
+         transitively; build/ covers direct references on older tooling. -->
+    <None Include="build\Flash.Sdk.targets" Pack="true" PackagePath="buildTransitive\Flash.Sdk.targets" />
+    <None Include="build\Flash.Sdk.targets" Pack="true" PackagePath="build\Flash.Sdk.targets" />
+    <!-- Build ordering only: make sure the tool is compiled before this project packs.
+         ReferenceOutputAssembly=false -> no assembly reference leaks into the SDK. -->
+    <ProjectReference Include="$(FlashLuaDefGenProject)" Condition="'$(FlashLuaDefGenProject)' != ''"
+                      ReferenceOutputAssembly="false" Private="false" />
+  </ItemGroup>
+
+  <!-- Collect the tool's build output into the package at PACK time (static item groups
+       evaluate before the tool is built on a clean run). Fails the pack if the tool is
+       missing (a package without the generator would silently ship broken DX); opt out
+       with /p:FlashPackWithoutLuaDefGen=true. -->
+  <Target Name="FlashPackLuaDefGen" BeforeTargets="_GetPackageFiles;GenerateNuspec">
+    <Error Condition="'$(FlashPackWithoutLuaDefGen)' != 'true' AND !Exists('$(FlashLuaDefGenBin)\Flash.LuaDefGen.dll')"
+           Text="Flash.LuaDefGen is not built ($(FlashLuaDefGenBin)). Build tools/Flash.LuaDefGen -c $(Configuration) before packing, or pass -p:FlashPackWithoutLuaDefGen=true." />
+    <ItemGroup Condition="Exists('$(FlashLuaDefGenBin)\Flash.LuaDefGen.dll')">
+      <None Include="$(FlashLuaDefGenBin)\*.dll;$(FlashLuaDefGenBin)\*.json" Pack="true" PackagePath="tools\luadefgen" />
+    </ItemGroup>
+  </Target>
 
   <ItemGroup>
     <!-- Database API: SQLite as the zero-setup default adapter (file-based) plus

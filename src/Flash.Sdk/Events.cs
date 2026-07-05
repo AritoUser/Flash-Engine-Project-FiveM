@@ -18,7 +18,7 @@ namespace Flash;
 /// receive the decoded arguments as object?[] (numbers arrive as long/double, strings as
 /// string, nested arrays/maps as object?[] or Dictionary).
 /// </summary>
-public static class Events
+public static partial class Events
 {
     // Handlers PER resource (key = resource name) → per event name → list.
     // Why per resource: the shared SDK is static — without partitioning, a dispatch for

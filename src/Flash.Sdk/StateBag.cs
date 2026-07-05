@@ -68,12 +68,15 @@ public sealed class StateBag
         finally { Marshal.FreeCoTaskMem(bag); Marshal.FreeCoTaskMem(k); }
     }
 
-    /// <summary>Reads a value typed (default if not set or the type does not match).</summary>
-    public T? Get<T>(string key)
-    {
-        object? v = Get(key);
-        return v is T t ? t : default;
-    }
+    /// <summary>
+    /// Reads a value typed. Values cross the client/replication boundary as msgpack, which
+    /// widens/narrows numbers (an <c>int</c> set here can come back as <c>long</c>/<c>double</c>),
+    /// so a plain <c>value is T</c> check would wrongly return default for a numerically valid
+    /// value. Coerce through <see cref="Args.To{T}"/> (same path as event/DB args) so
+    /// <c>Get&lt;int&gt;</c>/<c>Get&lt;float&gt;</c>/nullable primitives work regardless of the
+    /// wire type. Returns default if absent or not convertible. (#155)
+    /// </summary>
+    public T? Get<T>(string key) => Args.To<T>(Get(key));
 
     /// <summary>bag["key"] = value (always replicated) or var x = bag["key"].</summary>
     public object? this[string key]

@@ -11,7 +11,7 @@ namespace Flash;
 /// with LUA/JS resources (FiveM's __cfx_export_* protocol) is a later step — it needs
 /// the full funcref system (encoding local funcrefs + call return values).
 /// </summary>
-public static class Exports
+public static partial class Exports
 {
     // Per resource (key = resource name) → per export name → handler.
     // Partitioned per resource (like Events) → cleanly removable on unload; identity

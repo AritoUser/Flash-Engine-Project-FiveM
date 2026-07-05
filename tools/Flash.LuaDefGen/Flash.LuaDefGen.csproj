@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- EmmyLua definition generator (#173): reads a compiled resource assembly, finds the
+       [FlashExport] methods and emits an EmmyLua-compliant <resource>.d.lua so Lua scripts
+       calling the C# exports get autocomplete / type hints / hover docs in VS Code
+       (sumneko Lua Language Server).
+
+       Runs as a post-build step (see src/dotnet/Flash.Sdk/build/Flash.Sdk.targets); the
+       built tool is packed into the Flash.Sdk NuGet package under tools/luadefgen so
+       consumer resources get .d.lua generation automatically on `dotnet build`. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>Flash.LuaDefGen</AssemblyName>
+    <RootNamespace>Flash.LuaDefGen</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- Inspection only: the resource assembly is loaded for METADATA, never executed. -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.Reflection.MetadataLoadContext" Version="10.0.0" />
+  </ItemGroup>
+
+</Project>

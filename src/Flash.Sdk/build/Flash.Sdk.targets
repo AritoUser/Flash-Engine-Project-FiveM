@@ -1,0 +1,37 @@
+<Project>
+
+  <!-- Flash.Sdk build integration (#173): after a resource compiles, run Flash.LuaDefGen to
+       emit <project>.d.lua next to the DLL: EmmyLua definitions for every [FlashExport]
+       method, so Lua scripts calling the C# exports get autocomplete/type hints/hover docs
+       in VS Code (sumneko Lua Language Server).
+
+       Ships in the Flash.Sdk NuGet package (buildTransitive/) with the tool packed under
+       tools/luadefgen/. Opt out per project with <FlashGenerateLuaDefs>false</...>; the
+       target also no-ops when the tool is not present, so builds never break on it. -->
+
+  <PropertyGroup>
+    <FlashGenerateLuaDefs Condition="'$(FlashGenerateLuaDefs)' == ''">true</FlashGenerateLuaDefs>
+    <!-- Default path = the nupkg layout (buildTransitive/ -> ../tools/luadefgen/). In-repo
+         consumers (ProjectReference instead of PackageReference) override this property. -->
+    <FlashLuaDefGenPath Condition="'$(FlashLuaDefGenPath)' == ''">$(MSBuildThisFileDirectory)..\tools\luadefgen\Flash.LuaDefGen.dll</FlashLuaDefGenPath>
+    <!-- The resource name used for `exports.<name>` in the definitions. -->
+    <FlashResourceName Condition="'$(FlashResourceName)' == ''">$(MSBuildProjectName)</FlashResourceName>
+  </PropertyGroup>
+
+  <Target Name="FlashGenerateLuaDefs" AfterTargets="Build"
+          Condition="'$(FlashGenerateLuaDefs)' == 'true' AND Exists('$(FlashLuaDefGenPath)') AND '$(TargetPath)' != ''">
+    <ItemGroup>
+      <!-- Flash.Sdk.dll from the resolved references: the tool needs it to resolve the
+           [FlashExport] attribute type (it is NOT copied into the resource output,
+           Private=false / ExcludeAssets=runtime). -->
+      <_FlashSdkRefPath Include="@(ReferencePath)" Condition="'%(Filename)' == 'Flash.Sdk'" />
+    </ItemGroup>
+    <PropertyGroup>
+      <_FlashLuaXmlArg Condition="Exists('$(TargetDir)$(TargetName).xml')">--xml "$(TargetDir)$(TargetName).xml"</_FlashLuaXmlArg>
+    </PropertyGroup>
+    <!-- ContinueOnError: a definition-generation hiccup must never fail the resource build. -->
+    <Exec Command="dotnet exec &quot;$(FlashLuaDefGenPath)&quot; --assembly &quot;$(TargetPath)&quot; --resource &quot;$(FlashResourceName)&quot; --out &quot;$(TargetDir)$(FlashResourceName).d.lua&quot; $(_FlashLuaXmlArg) @(_FlashSdkRefPath->'--sdk &quot;%(FullPath)&quot;', ' ')"
+          ContinueOnError="true" StandardOutputImportance="low" StandardErrorImportance="normal" />
+  </Target>
+
+</Project>

@@ -1,3 +1,6 @@
+using System.Threading;
+using System.Threading.Tasks;
+
 namespace Flash;
 
 /// <summary>
@@ -42,4 +45,28 @@ public interface ITickable
 {
     /// <summary>Called once per server frame (between OnStart and OnStop).</summary>
     void OnTick();
+}
+
+/// <summary>
+/// OPTIONAL additional contract for resources that need to run ASYNCHRONOUS cleanup on
+/// stop (e.g. flushing player data to the database) BEFORE the resource is torn down.
+///
+/// Why this exists: <see cref="IResource.OnStop"/> is synchronous. Firing async DB saves
+/// from it is a data-loss trap — the host would tear down the resource's ALC (and cancel
+/// its pending async work) before the writes reach the database. When a resource implements
+/// this interface, the host awaits <see cref="OnStopAsync"/> within a bounded grace window
+/// (convar <c>flash_stop_grace_ms</c>, default 5000) — pumping the resource's scheduler so
+/// awaits/DB continuations resume on the script thread — and only THEN calls
+/// <see cref="IResource.OnStop"/> and unloads the ALC.
+///
+/// Contract: keep it bounded. If the grace window elapses, the passed cancellation token
+/// is cancelled and the host proceeds with teardown regardless — honor the token to finish
+/// promptly. Use OnStopAsync for async flushing and the synchronous OnStop for releasing
+/// references. (#40)
+/// </summary>
+public interface IAsyncStoppable
+{
+    /// <summary>Async cleanup run before the resource is torn down; honor the token — the
+    /// host stops waiting once the grace window elapses.</summary>
+    Task OnStopAsync(CancellationToken cancellationToken);
 }

@@ -26,6 +26,11 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
+      # The Flash.Sdk package bundles the EmmyLua definition generator (tools/luadefgen);
+      # the pack step below fails if the tool output is missing, so build it first.
+      - name: Build Flash.LuaDefGen (packed into Flash.Sdk)
+        run: dotnet build tools/Flash.LuaDefGen/Flash.LuaDefGen.csproj -c Release
+
       - name: Pack
         run: |
           dotnet pack src/Flash.Sdk/Flash.Sdk.csproj -c Release -o artifacts

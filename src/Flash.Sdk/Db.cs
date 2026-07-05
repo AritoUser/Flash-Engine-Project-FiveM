@@ -1,6 +1,8 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Data.Common;
+using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -165,6 +167,30 @@ public static class Db
             await using var reader = await cmd.ExecuteReaderAsync();
             return ReadAll(reader);
         });
+    }
+
+    // === Typed mapping (Dapper-like): rows -> strongly-typed objects (#115) =============
+    //
+    //  Columns map to public writable properties by name, case-insensitively and ignoring
+    //  underscores -- so `vip_level` binds to `VipLevel`, `created_at` to `CreatedAt`. Values
+    //  are coerced through Args.ToType (the SAME numeric-safe path as event/state args), so
+    //  MySQL `bigint`/`double`/`decimal` land in `int`/`float`/... without cast exceptions
+    //  (the #85 class of bugs). NULL columns leave the property at its default.
+    //  The per-type column->setter map is built once via reflection and cached (see Mapper<T>).
+
+    /// <summary>Runs a query and maps each row to a new <typeparamref name="T"/> (blocks the frame; use <see cref="QueryAsync{T}"/> in hot paths).</summary>
+    public static List<T> Query<T>(string sql, params object?[] args) where T : new()
+        => Mapper<T>.Map(Query(sql, args));
+
+    /// <summary>Like <see cref="Query{T}"/>, but without blocking the server frame; the await resumes on the script thread.</summary>
+    public static async Task<List<T>> QueryAsync<T>(string sql, params object?[] args) where T : new()
+        => Mapper<T>.Map(await QueryAsync(sql, args));
+
+    /// <summary>Maps the FIRST row to <typeparamref name="T"/>, or null if the query returned no rows.</summary>
+    public static async Task<T?> QuerySingleAsync<T>(string sql, params object?[] args) where T : class, new()
+    {
+        var rows = await QueryAsync(sql, args);
+        return rows.Count == 0 ? null : Mapper<T>.MapRow(rows[0]);
     }
 
     /// <summary>
@@ -333,6 +359,64 @@ public static class Db
             rows.Add(row);
         }
         return rows;
+    }
+
+    // ---- Per-type row mapper for Query<T>/QueryAsync<T>. Built once (reflection) and
+    //      cached: column names -> property setters. Reflection SetValue is used rather
+    //      than compiled expression trees deliberately -- DB result mapping is not a
+    //      per-frame hot path, and the cached lookup keeps it allocation-light and simple. ----
+    private static class Mapper<T> where T : new()
+    {
+        // Key = normalized column/property name (lower-case, underscores stripped) so
+        // `vip_level` and `VipLevel` collide onto the same setter.
+        private static readonly Dictionary<string, Action<T, object?>> s_setters = Build();
+
+        private static Dictionary<string, Action<T, object?>> Build()
+        {
+            var map = new Dictionary<string, Action<T, object?>>();
+            foreach (var prop in typeof(T).GetProperties(BindingFlags.Public | BindingFlags.Instance))
+            {
+                if (!prop.CanWrite || prop.GetIndexParameters().Length > 0) continue;
+                var type = prop.PropertyType;
+                // A non-nullable value-type property can't hold null (DB NULL / failed coercion):
+                // leave it at its default. A reference type or Nullable<T> CAN, so a DB NULL must
+                // overwrite a C# default initializer (reflect the DB state, like Dapper). (#166)
+                bool canBeNull = !type.IsValueType || Nullable.GetUnderlyingType(type) != null;
+                map[Normalize(prop.Name)] = (target, value) =>
+                {
+                    object? converted = Args.ToType(value, type);
+                    if (converted != null || canBeNull) prop.SetValue(target, converted);
+                };
+            }
+            return map;
+        }
+
+        public static List<T> Map(List<Dictionary<string, object?>> rows)
+        {
+            var list = new List<T>(rows.Count);
+            foreach (var row in rows) list.Add(MapRow(row));
+            return list;
+        }
+
+        public static T MapRow(Dictionary<string, object?> row)
+        {
+            var obj = new T();
+            // Do NOT skip NULL columns here: a DB NULL must reach the setter so it can null out
+            // a reference/nullable property (overwriting any C# default initializer). The setter
+            // itself decides whether null is assignable to the target type. (#166)
+            foreach (var (column, value) in row)
+                if (s_setters.TryGetValue(Normalize(column), out var set)) set(obj, value);
+            return obj;
+        }
+
+        private static string Normalize(string name)
+        {
+            Span<char> buf = stackalloc char[name.Length];
+            int n = 0;
+            foreach (char c in name)
+                if (c != '_') buf[n++] = char.ToLowerInvariant(c);
+            return new string(buf[..n]);
+        }
     }
 
     // ---- Provider abstraction: connection factory + the few dialect differences. ----

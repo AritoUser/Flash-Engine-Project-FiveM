@@ -1,5 +1,6 @@
 using System;
 using System.Globalization;
+using System.Linq;
 using System.Reflection;
 using System.Threading.Tasks;
 
@@ -65,8 +66,21 @@ public static partial class Commands
             var ps = m.GetParameters();
             string usage = BuildUsage(attr.Name, ps);
 
+            // Precompute the authorization policy ONCE at registration (#131) so the
+            // per-invocation path doesn't re-reflect. Includes class-level attributes (#162).
+            var authPolicy = Authorization.PolicyFor(m);
+
             Register(attr.Name, (src, args, raw) =>
             {
+                // Authorization gate: reject unauthorized callers before the handler runs
+                // (and before argument binding leaks a usage line). Console (src 0) is trusted.
+                if (authPolicy.HasAny && !authPolicy.Check(src, out string deny))
+                {
+                    new CommandContext(src, raw).Reply($"Access denied: {deny}.");
+                    Log.Warn($"[SECURITY] command '{attr.Name}' denied for src={src}: {deny}.");
+                    return;
+                }
+
                 if (!TryBind(ps, src, args, raw, out var call, out string? error))
                 {
                     new CommandContext(src, raw).Reply(error ?? usage);
