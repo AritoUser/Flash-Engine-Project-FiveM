@@ -85,6 +85,44 @@ pl.State["money"] = 500;               // the player's replicated state bag
 empty values. For accounts/bans use **identifiers** as keys, never the NetID (which is
 per session).
 
+### Account ID (fixed user ID)
+
+```csharp
+int? id = pl.AccountId;                // persistent DB-backed ID, null until replicated
+var byId = Players.GetByAccountId(15); // connected player carrying that ID, or null
+```
+
+`AccountId` is the stable, human-readable ID the gameplay framework (flash-core)
+assigns per account and replicates into the player's state bag (`"id"`). It survives
+reconnects and restarts — use it in commands and admin tooling instead of the NetID.
+Command-router `ServerPlayer` parameters resolve it automatically: a numeric argument
+matches a **connected netId first**, then falls back to the account ID.
+
+### Session keys (ephemeral connection identity)
+
+```csharp
+string? key = pl.SessionKey;              // cryptographically random GUID, per CONNECTION
+var owner  = Players.GetBySession(key);   // resolve back; null once the connection ended
+```
+
+FiveM recycles NetIDs, so async work keyed on a netId can hit the WRONG player after a
+reconnect. A `SessionKey` never survives the connection: it is generated fresh per
+connection (cryptographically secure RNG) and invalidated on disconnect — key long-lived
+async state and client-issued request authorization (NUI) on it instead of the netId.
+
+Security rules (important):
+
+- **The key is a secret between the server and the owning client.** Never write it to a
+  replicated state bag and never broadcast it (`EmitAllClients`) — anyone holding the key
+  can act as that session.
+- **Never generate your own keys** from `new Random()` or timestamps if you build similar
+  mechanisms — predictable keys can be hijacked. `SessionKey` uses a cryptographic RNG.
+- **Reconnects invalidate the key.** The registry validates the owner identity on every
+  read, so a recycled netId can never inherit the previous player's key — a `null` from
+  `GetBySession` means "this session is over", treat it as an auth failure.
+- **If you pass the key into NUI**, guard the NUI page against XSS (no untrusted external
+  scripts) — a script injection can exfiltrate the key.
+
 ## Commands
 
 ```csharp
@@ -118,9 +156,79 @@ Commands.RegisterAll(new AdminCommands());
 ```
 
 Supported parameter types: `CommandContext` (injected — caller/raw line/`Reply`),
-`int`/`long`/`float`/`double`/`bool`/`string`, and `ServerPlayer` (from a netId).
-`[Rest]` on the last string captures the remaining line. Async (`Task`) methods
-are awaited safely; handler exceptions are logged and routed to `Diagnostics`.
+`int`/`long`/`float`/`double`/`bool`/`string`, and `ServerPlayer` (from a connected
+netId, falling back to the persistent account ID). `[Rest]` on the last string captures
+the remaining line. Async (`Task`) methods are awaited safely; handler exceptions are
+logged and routed to `Diagnostics`.
+
+### Chat autocomplete (automatic suggestions)
+
+Every `[Command]`-routed command automatically registers a chat suggestion (the
+autocomplete tooltip of the standard `chat` resource) — name, help text and one entry
+per parameter. Add help texts declaratively:
+
+```csharp
+[Command("givemoney", Description = "Gives cash to a player.")]
+public void GiveMoney(
+    ServerPlayer target,
+    [Description("Amount in $")] int amount,
+    [Description("Account ('cash' or 'bank')")] string account = "cash") { ... }
+```
+
+Parameters without a `[Description]` get a generated hint from their type; optional
+parameters are marked. Suggestions are pushed to all connected players at registration,
+re-sent to late joiners when their chat UI announces itself (`chat:init`), and retracted
+when the resource stops. No client code needed.
+
+## Item handlers
+
+Decouples "player used item X" from whatever inventory triggers it: gameplay resources
+declare handlers, the inventory side dispatches — across resources, like exports.
+
+```csharp
+public sealed class Consumables
+{
+    [ItemHandler("bread")]
+    [ItemHandler("sandwich")]
+    public void OnEat(ServerPlayer player, string item)
+    {
+        // first ServerPlayer/int param = the using player, first string = item name,
+        // further params bind from the extra args of Items.Use.
+    }
+}
+
+Items.RegisterAll(new Consumables());          // or Items.RegisterAll(typeof(StaticClass))
+
+// inventory side (any Flash resource):
+bool handled = Items.Use(netId, "bread");      // false -> no handler, don't consume
+```
+
+Async (`Task`) handlers are awaited safely; a throwing handler neither stops other
+handlers nor the inventory call. Handlers are removed when their resource stops.
+
+## Audit trail
+
+Structured, non-blocking audit logging that never touches the game database: entries go
+into an in-memory queue and a background writer batches them once per second into daily
+JSON-Lines files under `flash-audit/` in the server data directory (one JSON object per
+line — directly ingestible by Loki/Elastic/`jq`).
+
+```csharp
+Audit.Log("money:transfer", "Alice (license:abc)", target: "Bob",
+          details: new { amount = 500, account = "bank" });
+Audit.Log(player, "admin:ban", target: "license:xyz",
+          details: new { minutes = 60, reason = "cheating" });   // script thread only
+
+Audit.Configure(@"D:\logs\my-server");     // optional: override the output directory
+Audit.AddSink(entry => { ... });           // optional: forward to Loki/Discord/...
+```
+
+The string-based `Log` is safe from **any** thread and never blocks; the `ServerPlayer`
+overload reads natives (script thread only). Sinks run on the background writer — no
+natives inside sinks; they are removed automatically when the registering resource stops.
+An overflow guard caps the queue and records a drop marker instead of exhausting memory.
+
+## Rpc (request/response)
 
 ### Rate limiting (client events)
 
@@ -383,6 +491,29 @@ RoutingBuckets.MoveEntity(vehicleEntity, world);
 RoutingBuckets.SetLockdownMode(world, "strict"); // server-authoritative entities only
 RoutingBuckets.Release(world);              // players return to world 0
 ```
+
+### VirtualInstance (lifecycle-managed)
+
+Raw buckets leak: a vehicle spawned inside a private bucket outlives the minigame
+forever, players must be routed back by hand. `VirtualInstance` bundles the bucket,
+the entities and the members into one disposable object:
+
+```csharp
+using var lobby = new VirtualInstance();           // allocates a bucket, strict lockdown
+lobby.AddPlayer(player);                           // routes player (+ their vehicle) in,
+                                                   // sets replicated state key "instance"
+var kart = lobby.SpawnVehicle("veto2", pos, 90f);  // spawned INSIDE the instance, tracked
+lobby.SpawnProp("prop_barrier_work05", pos2);
+// ... minigame runs ...
+lobby.Dispose();                                   // members -> world 0, "instance" cleared,
+                                                   // ALL tracked entities deleted, bucket freed
+```
+
+`Members`/`Entities` enumerate what is currently inside (pruned automatically).
+`TrackEntity` adopts an externally created entity into the cleanup. Voice: the SDK
+cannot drive Mumble (client-side) — the replicated `"instance"` state-bag key on each
+member is the contract voice resources (pma-voice etc.) and HUDs bind to for channel
+isolation.
 
 ## Diagnostics (error hook)
 

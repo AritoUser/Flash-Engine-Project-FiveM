@@ -67,6 +67,25 @@ public readonly struct ServerPlayer
     /// with <c>Async.Delay(ms, token)</c> so waits die with the player instead of
     /// resuming against an empty session.</summary>
     public System.Threading.CancellationToken DropToken() => DropTokens.Get(NetId);
+
+    /// <summary>
+    /// The persistent, database-backed account ID (fixed user ID) of the player, or null
+    /// while the gameplay framework has not replicated it yet. Read from the replicated
+    /// state-bag key "id" that flash-core sets right after the session is loaded — stable
+    /// across reconnects and restarts, unlike <see cref="NetId"/>. (#174)
+    /// </summary>
+    public int? AccountId
+    {
+        get { int v = State.Get<int>("id"); return v > 0 ? v : null; }
+    }
+
+    /// <summary>
+    /// The ephemeral per-connection session key (cryptographically random GUID), or null
+    /// when not connected. Fresh on every reconnect — safe to key async state on where a
+    /// recycled NetID would poison state. SECRET between server and THIS client: never
+    /// put it in replicated state bags or broadcast it. (#183)
+    /// </summary>
+    public string? SessionKey => Sessions.GetKey(NetId);
 }
 
 /// <summary>
@@ -78,6 +97,21 @@ public static class Players
     /// <summary>Player by NetID. (Does not check whether they are connected —
     /// properties then return empty values.)</summary>
     public static ServerPlayer Get(int netId) => new ServerPlayer(netId);
+
+    /// <summary>Player by session key (see <see cref="ServerPlayer.SessionKey"/>), or
+    /// null if the key is unknown or its connection ended. (#183)</summary>
+    public static ServerPlayer? GetBySession(string sessionKey) => Sessions.GetPlayer(sessionKey);
+
+    /// <summary>Connected player by persistent account ID (replicated by the gameplay
+    /// framework, see <see cref="ServerPlayer.AccountId"/>), or null if no connected
+    /// player carries that ID. (#174)</summary>
+    public static ServerPlayer? GetByAccountId(int accountId)
+    {
+        if (accountId <= 0) return null;
+        foreach (var p in All)
+            if (p.AccountId == accountId) return p;
+        return null;
+    }
 
     /// <summary>Number of currently connected players.</summary>
     public static int Count => global::Flash.Natives.Cfx.GetNumPlayerIndices();

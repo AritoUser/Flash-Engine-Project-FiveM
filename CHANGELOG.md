@@ -8,6 +8,7 @@ stable plugin ABI).
 
 | Flash release | Flash.Sdk (NuGet) | Core contract | FXServer artifact (Windows) |
 |---|---|---|---|
+| 0.6.0 | 0.6.0 | **v13** | **31689** (`06d4d348c`) |
 | 0.5.1 | 0.5.1 | v12 | **31689** (`06d4d348c`) |
 | 0.5.0 | 0.5.0 | v12 | **31689** (`06d4d348c`) |
 | 0.4.1 | 0.4.1 | v12 | **31689** (`06d4d348c`) |
@@ -22,6 +23,113 @@ Rules:
   fine (the contract only grows by appending).
 - **Payload ↔ artifact:** pinned exactly. A different artifact version needs a payload
   release built for it.
+
+## [0.6.0] — 2026-07-06
+
+Large feature release closing the actionable server-side backlog: player identity, gameplay
+vitals, QoL lifecycle, the security/anti-cheat suite, the vehicle garage, and the
+Zig-backed transactional inventory — plus a full pre-release review pass (#194–211).
+**This is a PAYLOAD release, not managed-only**: the transactional inventory (#46) grows the
+native core contract to **v13**, so the payload ships a rebuilt `citizen-scripting-flash.dll`
++ core; a v13 SDK requires the v13 core. The FXServer artifact pin (**31689**) is unchanged.
+Every item is covered by a `sample-resource` / `flash-core` / `flash-admin` selftest and is
+green in the real release FXServer.
+
+**Pre-release review fixes (#194–211)** — a security/reliability review of the batches above,
+all fixed and re-verified in the real release FXServer:
+- Anti-cheat: weaponDamageEvent payload is `args[1]` not `args[0]` (the check was fully
+  bypassed); environmental/heavy damage exclusions (no more false kicks on falls/cars/
+  explosions); server-side `GetEntityVelocity` replaces the client-only `IsPedFalling`. (#194/#195/#196)
+- VirtualInstance routes a member's brought-in vehicle back out instead of stranding it. (#197)
+- Garage: driver-seat + ownership checks on store (no passenger griefing / plate-collision
+  overwrite); `stored` flag reset on startup (no post-restart retrieval deadlock). (#199/#200)
+- flash-admin: offline commands resolve the persistent Account ID before an online NetID
+  (no target hijacking); anti-VPN strips the port from the endpoint. (#204/#205)
+- Inventory: snapshot no longer truncates large containers (was silent data loss); reconnect
+  no longer wipes the reloaded inventory; inventories persist on auto-save + shutdown. (#208/#210/#211)
+- Script-thread assertions on native-touching APIs (Audit.Log(ServerPlayer), Sessions, Http,
+  StateBag/GlobalState); Items registry locking; audit sinks marshalled to the script thread. (#198/#201/#202/#203/#206/#209)
+
+**Core / anti-dupe**
+- Transactional inventory backed by the native Zig core: item counts live in unmanaged
+  memory and every check-and-decrement is atomic under a lock, so "take more than exists" is
+  impossible even under real cross-thread concurrency (the spam-click dupe). `Flash.Inventory`
+  (give/take/move/count/snapshot, safe from any thread); flash-core `inventories` persistence
+  (auto load-on-join / save-on-drop by character id) + exports. Proven in-server by 800
+  concurrent off-thread moves on 200 items resolving to exactly 200 winners. Core contract
+  v12 → v13; new public `StateBag.ForEntity`/`ForPlayer` SDK accessors. (#46)
+
+**Player identity**
+- `ServerPlayer.SessionKey` + `Players.GetBySession`: cryptographically random per-connection
+  token that never survives a reconnect — key async state and NUI request auth on it instead
+  of the recyclable NetID. Owner-validated on every read; invalidated at the host's global
+  playerDropped choke point. Security rules documented in `docs/api.md`. (#183)
+- `ServerPlayer.AccountId` + `Players.GetByAccountId`: the persistent account ID replicated
+  by flash-core (state-bag `"id"`) as a first-class SDK property; command-router
+  `ServerPlayer` arguments resolve connected netId first, then account ID. flash-admin gains
+  offline moderation (`offlineban`, `offlinesetlevel`, unban by account ID). (#174)
+
+**DX**
+- Automatic chat autocomplete for `[Command]`-routed commands: `[Command].Description` /
+  `[Description]` on methods and parameters feed `chat:addSuggestion`; late joiners get them
+  on `chat:init`, resource stop retracts them. (#156)
+- `[ItemHandler]` item action registry: gameplay resources declare handlers, any inventory
+  dispatches with `Items.Use(netId, item, ...)` across resources; typed binding, async
+  support, per-resource cleanup. (#159)
+
+**Observability**
+- `Flash.Audit`: structured, non-blocking audit trail — in-memory queue + background writer,
+  daily JSON-Lines files under `flash-audit/`, per-resource custom sinks, overflow guard.
+  Never touches the game database, never blocks the script thread. (#144)
+
+**Gameplay (flash-core)**
+- Server-authoritative vehicle garage: owned vehicles keyed by character id, state
+  serialized to a JSON blob in a `vehicles` table, spawned via `CreateVehicleServerSetter`
+  with server-side state applied before networking (model/plate/colours/body health/dirt/
+  locks un-spoofable; fuel/engine health/livery/tint/mods stored server-side and
+  replicated via the `flashVehState` entity state bag for a client applier). Ownership +
+  shared keys (`vehicle_keys`) gate retrieve/engine. Exports `garageStore`/`garageRetrieve`
+  /`garageList`/`garageRegister`/`garageGiveKey`/`garageHasAccess`. New public
+  `StateBag.ForEntity`/`ForPlayer` SDK accessors. (#62)
+- Server-authoritative vitals: hunger/thirst decay purely server-side (configurable via
+  convars), replicate as state bags for HUDs, fire `flashfw:vitalThreshold` on crossing
+  25/10/0, persist with the character (schema migration included). Exports:
+  `getVital`/`setVital`/`addVital`/`isDead`/`setDead`. (#158)
+- Combat-log guard: disconnecting with critical ped health marks the character dead
+  (persisted + replicated + `flashfw:combatLog` event + audit entry) — reconnecting fully
+  healed is over. (#140)
+
+**Instancing**
+- `VirtualInstance`: lifecycle-managed world instances — allocated routing bucket (strict
+  lockdown), tracked server-side entity spawns (vehicle/ped/prop), member routing incl.
+  current vehicle, replicated `"instance"` state key as the voice/HUD contract; `Dispose`
+  restores players, deletes all tracked entities and frees the bucket. (#126)
+
+**Security (anti-cheat)**
+- Server-authoritative integrity layer in flash-core (all opt-in, `off`/`log`/`block`/`kick`):
+  entity mass-spawn rate limiting, implausible weapon-damage detection and on-foot
+  speed/noclip validation, with a `Flash.Security` exception API
+  (`AddWeaponException`/`BypassEntityLimits`) and an ACE bypass for admins. The decision
+  logic is covered by the flash-core selftest; the live event hooks are wired but require
+  a client to exercise end-to-end. (#54, #55)
+
+**Security (flash-admin)**
+- Hardware-token ban hardening: bans now record the client's HWID tokens
+  (`ban_hardware_tokens`) and the connect gate rejects any matching token even with a
+  clean license — ban evasion from the same machine fails. Unban clears the tokens. (#52)
+- Optional identity gates in the connect deferral (all default off): require
+  Discord/Steam/Cfx.re identifiers and an async anti-VPN/proxy HTTP check
+  (`flash_require_discord`/`_steam`/`_cfx`, `flash_anti_vpn_api`). (#53)
+
+**QoL / Lifecycle**
+- `[PreserveState]`: flagged static fields/properties survive resource restarts — the host
+  JSON-serializes them before the ALC unload and injects them back before `OnStart()` of
+  the reloaded instance (reference-free by design, so preserved state can never pin the
+  old ALC). (#117)
+- Vehicle reconnect (flash-core): crashing inside a vehicle reserves (vehicle, seat) in
+  RAM per license; reconnecting within `flash_reconnect_vehicle_minutes` warps the player
+  back into their exact seat if the vehicle survived — otherwise the normal saved-position
+  spawn applies. (#107)
 
 ## [0.5.1] — 2026-07-06
 

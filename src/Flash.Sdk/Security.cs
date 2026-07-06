@@ -72,4 +72,78 @@ public static class Security
         try { var m = regex.Match(value); return m.Success && m.Index == 0 && m.Length == value.Length; }
         catch (RegexMatchTimeoutException) { return false; } // pathological input -> reject
     }
+
+    // =================================================================================
+    //  Anti-cheat exception / bypass registry (#54, #55).
+    //
+    //  A rigid anti-cheat causes false positives when a module LEGITIMATELY does the thing
+    //  it guards against — a paintball script hands out weapons, a dealership spawns cars.
+    //  These helpers let any resource grant a SCOPED, TIME-LIMITED exception that the
+    //  server-side enforcement (flash-core AntiCheat) consults before it acts. Pure
+    //  time+dictionary state — no natives — so the decision is deterministic and testable.
+    //  Keyed by netId; entries expire on their own and are dropped on player disconnect.
+    // =================================================================================
+
+    // netId -> UTC ticks until which entity-limit checks are bypassed.
+    private static readonly ConcurrentDictionary<int, long> s_entityBypass = new();
+    // netId -> (weapon JOAAT hash) -> UTC ticks until allowed. Keyed on the HASH, not the
+    // name, because the server's weaponDamageEvent delivers the weapon as a JOAAT hash --
+    // AddWeaponException hashes the name the same way so both sides match. (#194)
+    private static readonly ConcurrentDictionary<int, ConcurrentDictionary<uint, long>> s_weaponExc = new();
+
+    /// <summary>The GTA weapon hash (Jenkins one-at-a-time over the lower-cased name) — the
+    /// same value GET_HASH_KEY / weaponDamageEvent's weaponType produces, computed without a
+    /// native so it works anywhere. (#194)</summary>
+    public static uint WeaponHash(string name)
+    {
+        uint h = 0;
+        foreach (char c in name)
+        {
+            h += (uint)char.ToLowerInvariant(c);
+            h += h << 10;
+            h ^= h >> 6;
+        }
+        h += h << 3;
+        h ^= h >> 11;
+        h += h << 15;
+        return h;
+    }
+
+    /// <summary>Lets <paramref name="netId"/> spawn entities without tripping the
+    /// mass-spawn limit for the next <paramref name="seconds"/> (e.g. a shop spawning a
+    /// fleet). (#54)</summary>
+    public static void BypassEntityLimits(int netId, int seconds)
+        => s_entityBypass[netId] = DateTime.UtcNow.AddSeconds(Math.Max(0, seconds)).Ticks;
+
+    /// <summary>True while <paramref name="netId"/> has an active entity-limit bypass.</summary>
+    public static bool IsEntityLimitBypassed(int netId)
+        => s_entityBypass.TryGetValue(netId, out long until) && until >= DateTime.UtcNow.Ticks;
+
+    /// <summary>Allows <paramref name="netId"/> to use <paramref name="weapon"/> without the
+    /// weapon-integrity check flagging it, for the next <paramref name="minutes"/>
+    /// (e.g. paintball). Weapon name is matched case-insensitively. (#54)</summary>
+    public static void AddWeaponException(int netId, string weapon, int minutes)
+    {
+        var map = s_weaponExc.GetOrAdd(netId, _ => new());
+        map[WeaponHash(weapon)] = DateTime.UtcNow.AddMinutes(Math.Max(0, minutes)).Ticks;
+    }
+
+    /// <summary>True if <paramref name="netId"/> currently has an exception for
+    /// <paramref name="weapon"/> (matched by weapon hash, case-insensitive).</summary>
+    public static bool IsWeaponAllowed(int netId, string weapon)
+        => IsWeaponAllowed(netId, WeaponHash(weapon));
+
+    /// <summary>True if <paramref name="netId"/> has an exception for the weapon with this
+    /// JOAAT hash (e.g. weaponDamageEvent's weaponType). (#194)</summary>
+    public static bool IsWeaponAllowed(int netId, uint weaponHash)
+        => s_weaponExc.TryGetValue(netId, out var map)
+           && map.TryGetValue(weaponHash, out long until) && until >= DateTime.UtcNow.Ticks;
+
+    /// <summary>Drops all exceptions of a player (called by the enforcement layer on
+    /// disconnect so a recycled netId can't inherit them).</summary>
+    public static void ClearPlayerExceptions(int netId)
+    {
+        s_entityBypass.TryRemove(netId, out _);
+        s_weaponExc.TryRemove(netId, out _);
+    }
 }

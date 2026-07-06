@@ -15,7 +15,20 @@ public sealed class CommandAttribute : Attribute
     public string Name { get; }
     /// <summary>true = only for ACE-authorized players (FiveM `restricted` flag).</summary>
     public bool Restricted { get; set; }
+    /// <summary>Help text shown in the chat autocomplete tooltip (#156). Alternatively
+    /// put a <see cref="DescriptionAttribute"/> on the method.</summary>
+    public string? Description { get; set; }
     public CommandAttribute(string name) => Name = name;
+}
+
+/// <summary>Help text for the chat autocomplete: on a command method it describes the
+/// command, on a parameter it describes that argument (#156). Picked up automatically
+/// by <see cref="Commands.RegisterAll"/> and pushed to the chat UI as a suggestion.</summary>
+[AttributeUsage(AttributeTargets.Parameter | AttributeTargets.Method)]
+public sealed class DescriptionAttribute : Attribute
+{
+    public string Text { get; }
+    public DescriptionAttribute(string text) => Text = text;
 }
 
 /// <summary>On the LAST string parameter: captures the rest of the line (spaces
@@ -101,12 +114,90 @@ public static partial class Commands
                     Diagnostics.Report($"command:{attr.Name}", tie.InnerException ?? tie);
                 }
             }, attr.Restricted);
+
+            RegisterSuggestion(attr, m, ps); // chat autocomplete tooltip (#156)
         }
     }
 
-    // Binds the command words to the method parameters. PURE (no natives) ->
-    // deterministically testable; ServerPlayer is only wrapped as a handle, whether the
-    // player is online is checked by the handler (a domain decision). false =
+    // ---- Chat suggestions (#156) ----------------------------------------------------
+    // [Command]-routed commands automatically feed the chat UI's autocomplete: name,
+    // help text ([Command].Description / [Description] on the method) and one entry per
+    // parameter ([Description] on the parameter, otherwise a generated hint). Pushed to
+    // all connected clients at registration; the chat resource's clients announce
+    // themselves with the "chat:init" NET event when their UI is ready, so late joiners
+    // get the suggestions re-sent then. Removed again on resource stop.
+
+    // Per resource: the suggestion payloads (for chat:init re-sends and removal on stop).
+    private static readonly System.Collections.Generic.Dictionary<string,
+        System.Collections.Generic.List<(string Name, string Help, object?[] Params)>> s_suggestions = new();
+    private static readonly System.Collections.Generic.HashSet<string> s_initWired = new();
+
+    private static void RegisterSuggestion(CommandAttribute attr, MethodInfo m, ParameterInfo[] ps)
+    {
+        string help = attr.Description
+            ?? m.GetCustomAttribute<DescriptionAttribute>()?.Text
+            ?? "";
+
+        var paramList = new System.Collections.Generic.List<object?>();
+        foreach (var p in ps)
+        {
+            if (p.ParameterType == typeof(CommandContext)) continue; // injected, not typed by the user
+            string hint = p.GetCustomAttribute<DescriptionAttribute>()?.Text ?? ParamHint(p);
+            if (p.HasDefaultValue)
+                hint += p.DefaultValue is string s && s.Length > 0 ? $" (default: {s})" : " (optional)";
+            paramList.Add(new System.Collections.Generic.Dictionary<string, object?>
+            {
+                ["name"] = p.Name ?? "arg",
+                ["help"] = hint,
+            });
+        }
+        object?[] paramArr = paramList.ToArray();
+
+        string resource = global::Flash.Natives.Cfx.GetCurrentResourceName() ?? "";
+        if (!s_suggestions.TryGetValue(resource, out var list)) s_suggestions[resource] = list = new();
+        list.Add((attr.Name, help, paramArr));
+
+        // Everyone currently connected gets it now; late joiners via chat:init below.
+        Events.EmitAllClients("chat:addSuggestion", "/" + attr.Name, help, (object?)paramArr);
+
+        if (s_initWired.Add(resource))
+            Events.On("chat:init", _ =>
+            {
+                int src = Events.SourceNetId;
+                if (src <= 0) return;
+                if (!s_suggestions.TryGetValue(resource, out var mine)) return;
+                foreach (var (name, h, pars) in mine)
+                    Events.EmitClient(src, "chat:addSuggestion", "/" + name, h, (object?)pars);
+            });
+    }
+
+    // Generated argument hint when no [Description] is given.
+    private static string ParamHint(ParameterInfo p)
+    {
+        var t = Nullable.GetUnderlyingType(p.ParameterType) ?? p.ParameterType;
+        return
+            t == typeof(ServerPlayer) ? "player (netId or account id)" :
+            t == typeof(int) || t == typeof(long) ? "number" :
+            t == typeof(float) || t == typeof(double) ? "decimal number" :
+            t == typeof(bool) ? "true/false" :
+            "text";
+    }
+
+    /// <summary>On resource stop: retract this resource's chat suggestions (the commands
+    /// themselves die with the funcref registry). Called by the host.</summary>
+    internal static void ClearResource(string resource)
+    {
+        s_initWired.Remove(resource);
+        if (!s_suggestions.Remove(resource, out var list)) return;
+        foreach (var (name, _, _) in list)
+        {
+            try { Events.EmitAllClients("chat:removeSuggestion", "/" + name); } catch { }
+        }
+    }
+
+    // Binds the command words to the method parameters. Deterministically testable
+    // outside the server: the only native-touching arm (ServerPlayer resolution) falls
+    // back to a plain handle wrap when natives are unavailable. false =
     // the caller replies with the generated usage line.
     internal static bool TryBind(ParameterInfo[] ps, int src, string[] args, string raw,
         out object?[] call, out string? error)
@@ -150,13 +241,32 @@ public static partial class Commands
                 _ when u == typeof(float) => float.TryParse(word, NumberStyles.Float, CultureInfo.InvariantCulture, out var vf) ? vf : null,
                 _ when u == typeof(double) => double.TryParse(word, NumberStyles.Float, CultureInfo.InvariantCulture, out var vd) ? vd : null,
                 _ when u == typeof(bool) => word is "true" or "1" ? true : word is "false" or "0" ? (object?)false : null,
-                _ when u == typeof(ServerPlayer) => int.TryParse(word, out var netId) ? Players.Get(netId) : null,
+                _ when u == typeof(ServerPlayer) => int.TryParse(word, out var netId) ? ResolvePlayer(netId) : null,
                 _ => null, // unsupported parameter type
             };
             if (bound == null) return false;
             call[i] = bound;
         }
         return true;
+    }
+
+    // Resolves a numeric command argument to a player: a CONNECTED netId wins, otherwise
+    // the persistent AccountId (fixed user ID, #174) is matched against connected players
+    // — so "/givemoney 15 100" works with the stable ID players actually see. Outside a
+    // server (standalone tests) the native calls throw -> fall back to the plain handle
+    // wrap, keeping TryBind deterministic.
+    private static object? ResolvePlayer(int id)
+    {
+        try
+        {
+            var byNet = Players.Get(id);
+            if (byNet.Connected) return byNet;
+            return Players.GetByAccountId(id); // null -> usage reply
+        }
+        catch
+        {
+            return Players.Get(id);
+        }
     }
 
     private static string BuildUsage(string name, ParameterInfo[] ps)

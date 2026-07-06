@@ -174,6 +174,43 @@ await Exports.Call<Task<bool>>("flash-core", "societyDepositFromPlayer", netId, 
 await Exports.Call<Task<bool>>("flash-core", "societyWithdrawToPlayer", netId, "police", 100, "bonus")!;
 ```
 
+## Vitals (hunger/thirst) & combat-log guard
+
+Hunger and thirst are **server-authoritative**: they live in the player session,
+decay on a server interval (pausing or alt-tabbing the client freezes nothing) and
+replicate as state bags for HUDs (`LocalPlayer.state.hunger` / `thirst` / `dead`).
+Values are clamped to 0..100 and persisted with the character.
+
+```cfg
+set flash_vitals_minutes      "1"    # decay interval in minutes (0 = vitals off)
+set flash_vitals_hunger_decay "1.5"  # percentage points per interval
+set flash_vitals_thirst_decay "2.0"
+set flash_combatlog_health    "101"  # ped health below this at disconnect = combat log
+```
+
+```csharp
+float hunger = Exports.Call<float>("flash-core", "getVital", netId, "hunger");
+Exports.Call("flash-core", "addVital", netId, "hunger", 25f);   // eating (clamped at 100)
+Exports.Call("flash-core", "setVital", netId, "thirst", 100f);
+
+// React to thresholds instead of polling — fires when a vital drops below 25/10/0:
+Events.On("flashfw:vitalThreshold", args =>
+{
+    int netId = Args.Int(args, 0);       // then: vital name, threshold, current value
+    // e.g. apply damage/effects client-side at 0, warn at 25
+});
+```
+
+**Combat-log guard:** disconnecting with critical ped health marks the character
+dead (`is_dead`, replicated as `dead`, `[SECURITY]` log + audit entry) and fires
+`flashfw:combatLog(netId, accountId, cid, hp)` — reconnecting fully healed is over.
+Dead characters stop decaying; revive from your ambulance/respawn module:
+
+```csharp
+bool dead = Exports.Call<bool>("flash-core", "isDead", netId);
+Exports.Call("flash-core", "setDead", netId, 0);    // revive (fires flashfw:playerRevived)
+```
+
 ## Set up flash-admin
 
 1. `ensure flash-admin` (after `flash-core`).
@@ -187,6 +224,28 @@ the audit log (`admin_log` table); rejected attempts show up as `[SECURITY]` war
 the server log.
 
 Queryable from your own resources: `Exports.Call<int>("flash-admin", "getLevel", netId)`.
+
+### Ban hardening & identity gates (opt-in)
+
+Bans are keyed on the license identifier, but a determined cheater just buys a second
+GTA account. On every ban, flash-admin also records the client's **hardware tokens**
+(`ban_hardware_tokens`); the connect gate rejects anyone presenting a banned token even
+with a clean license — ban evasion from the same PC fails. Unbanning clears the tokens
+too. This is always on and needs no config.
+
+Optional identity requirements in the connect gate (all default off — a public server
+leaves them off, a hardcore server turns them on without touching code):
+
+```cfg
+set flash_require_identifier "true"   # reject clients without any cryptographic id
+set flash_require_discord    "true"   # require a linked Discord account
+set flash_require_steam      "true"   # require Steam running
+set flash_require_cfx        "true"   # require a linked Cfx.re account (fivem: id)
+# Anti-VPN/proxy: if set, the async gate queries this URL ({ip} is substituted) and
+# rejects when the response contains the reject marker. fail-open on API errors.
+set flash_anti_vpn_api       "https://proxycheck.io/v2/{ip}?vpn=1&key=YOURKEY"
+set flash_anti_vpn_reject_if "\"proxy\":\"yes\""
+```
 
 ## Spawn at the last saved position
 
@@ -204,6 +263,133 @@ wins). Server-side, the current position is also queryable:
 var pos = Exports.Call<Dictionary<string, object?>>("flash-core", "getPosition", netId);
 // { x, y, z, heading } or null (no ped / never sampled)
 ```
+
+## Transactional inventory (un-dupeable)
+
+Item counts live in the **native core**, which makes every check-and-decrement atomic
+under a lock — so "take more than exists" is mathematically impossible, even when two
+requests arrive from different threads at the same millisecond (the classic spam-click
+dupe). Unlike the script-thread-only registries, these calls are **safe from any thread**
+(that's the whole point). You own item *types* and DB persistence; the core owns the
+live counts.
+
+```csharp
+// Containers are your own u64 ids: a character id, a trunk plate hash, a stash id.
+Inventory.Give(cid, "water", 3);
+bool took = Inventory.Take(cid, "water", 1);          // false if not enough (atomic)
+bool moved = Inventory.Move(trunkId, cid, "gun", 1);  // false if the source ran out
+uint have = Inventory.Count(cid, "water");
+```
+
+`Move`/`Take` return `false` (nothing changed) when the source lacks the quantity — a
+second concurrent move of the same last item loses, no duplicate. flash-core persists a
+container to the `inventories` table:
+
+```csharp
+await Exports.Call<Task>("flash-core", "invSave", cid)!;   // core -> DB
+await Exports.Call<Task>("flash-core", "invLoad", cid)!;   // DB -> core (absolute set)
+```
+
+Player inventories are auto-loaded on join and saved on drop, keyed by character id
+(`set flash_inventory_persist "false"` to opt out). Trunks/stashes use their own ids and
+call `invSave`/`invLoad` themselves.
+
+## Vehicle garage (server-authoritative)
+
+Owned vehicles are keyed by character id (`cid`) and their state lives in a `vehicles`
+table as a JSON blob. Retrieving spawns the vehicle with `CreateVehicleServerSetter` and
+applies the state **on the server** before it networks — a mod menu can't spoof the hash
+or hand out free upgrades. Access (engine/lock gate) is the owner or an explicit key
+holder (`vehicle_keys`).
+
+```csharp
+// Dealership: register a purchased vehicle to a character
+await Exports.Call<Task<bool>>("flash-core", "garageRegister", cid, GetHashKey("adder"), "ABC123", stateJson)!;
+
+// Garage menu: list, then drive one out at a position
+var mine = Exports.Call<List<object?>>("flash-core", "garageList", netId);   // [{plate,model,stored,owned}]
+int vehNetId = await Exports.Call<Task<int>>("flash-core", "garageRetrieve", netId, "ABC123", x, y, z, heading)!;
+
+// Store the vehicle the player is sitting in (returns the plate)
+string plate = Exports.Call<string>("flash-core", "garageStore", netId);
+
+// Shared keys (the hook the inventory key-item builds on)
+await Exports.Call<Task<bool>>("flash-core", "garageGiveKey", "ABC123", otherCid)!;
+bool canUse = await Exports.Call<Task<bool>>("flash-core", "garageHasAccess", netId, "ABC123")!;
+```
+
+**Server-applied vs client-applied:** the server's apiset registers fewer vehicle natives
+than the client. Model, plate, primary/secondary colours, body health, dirt and door
+locks are applied server-side (un-spoofable). Fuel, engine/petrol health, livery, window
+tint and the detailed tuning **mods** are client natives — they are still stored
+server-side (the server owns *what* the vehicle has) and replicated on retrieve via the
+`flashVehState` entity state bag for a thin client applier to apply on stream-in.
+
+## Server-side anti-cheat (opt-in)
+
+flash-core ships a server-authoritative integrity layer — all checks default **off** and
+each is set to `off` / `log` / `block` / `kick`:
+
+```cfg
+set flash_ac_mass_spawn  "block"   # entity mass-spawn (mod-menu entity flood)
+set flash_ac_weapon_damage "log"   # implausible weapon damage (damage modifier)
+set flash_ac_speed       "kick"    # on-foot speed hack / noclip
+
+set flash_ac_mass_spawn_limit "10"     # allowed spawns per window, per player
+set flash_ac_mass_spawn_window_ms "10000"
+set flash_ac_max_damage "200"          # single-hit damage above this is flagged
+set flash_ac_max_speed  "15"           # on-foot m/s above this is flagged
+```
+
+`log` observes only (writes a `[SECURITY]` line + audit entry), `block` cancels the
+offending action, `kick` removes the player. Admins bypass the physics check with the
+ACE `flash.ac.bypass` (grant it to your noclip/admin role).
+
+Legitimate mechanics grant themselves scoped, time-limited exceptions via `Flash.Security`
+so a paintball match or a car dealership doesn't trip the guard:
+
+```csharp
+Flash.Security.AddWeaponException(netId, "WEAPON_PISTOL", minutes: 10);  // paintball
+Flash.Security.BypassEntityLimits(netId, seconds: 5);                    // spawn a fleet
+```
+
+## Vehicle reconnect (crash recovery)
+
+Crashing while driving (or flying) no longer means spawning on foot while the group
+drives on: on disconnect flash-core remembers the vehicle and seat **in RAM only**
+(keyed by license — a server restart clears it, which is correct because the vehicle
+despawns anyway). If the player reconnects within the window and the vehicle still
+exists and isn't destroyed, the client warps them back into their exact seat right
+after spawning; the seat is skipped if someone took it meanwhile. Otherwise the normal
+saved-position spawn applies (the drop position was sampled anyway).
+
+```cfg
+set flash_reconnect_vehicle_minutes "10"   # reconnect window (0 = feature off)
+```
+
+No script code needed — it is part of the flash-core spawn flow.
+
+## Preserve state across restarts (hot-reload QoL)
+
+Restarting a resource unloads its AssemblyLoadContext — all in-memory state dies,
+which makes iterative development painful (rebuild the test lobby after every save).
+Flag **static** fields/properties with `[PreserveState]` and they survive the restart:
+the host serializes them to JSON before the unload and injects them back **before**
+`OnStart()` of the new instance.
+
+```csharp
+[PreserveState]
+private static Dictionary<int, LobbyConfig> s_lobbies = new();
+
+[PreserveState("my_stable_key")]           // optional stable key (default: member name)
+private static bool s_lobbyOpen;
+```
+
+Rules: static members only; the value must be `System.Text.Json`-serializable
+(primitives, collections, POCOs with public properties) — unserializable values are
+logged and skipped. The JSON round-trip is deliberate: it breaks references into the
+old assembly so preserved state can never pin the unloaded ALC. State lives in host
+memory only; a server restart clears it.
 
 ## Discord webhook (server notifications)
 

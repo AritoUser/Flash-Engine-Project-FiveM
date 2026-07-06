@@ -75,6 +75,9 @@ public static class Http
     public static Task<HttpResponse> Request(string url, string method = "GET", string data = "",
         IDictionary<string, string>? headers = null, int timeoutMs = DefaultTimeoutMs)
     {
+        // Reads GetCurrentResourceName + fires a native + mutates s_pending/s_registered
+        // (a plain single-threaded dictionary) -> off-thread would crash / race (#206).
+        ThreadGuard.AssertScriptThread("Http.Request");
         string res = global::Flash.Natives.Cfx.GetCurrentResourceName() ?? "";
         EnsureResponseHandler(res);
 

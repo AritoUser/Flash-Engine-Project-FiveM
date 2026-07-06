@@ -17,9 +17,19 @@ public sealed class StateBag
 
     internal StateBag(string bagName) => _bagName = bagName;
 
+    /// <summary>The replicated state bag of a network entity ("entity:&lt;netId&gt;") —
+    /// e.g. to attach server-authoritative state (vehicle mods, door state) that a client
+    /// script reads via <c>Entity(netId).state</c>. Server-authoritative.</summary>
+    public static StateBag ForEntity(int netId) => new StateBag($"entity:{netId}");
+
+    /// <summary>The replicated state bag of a player ("player:&lt;netId&gt;"). Same value
+    /// as <see cref="ServerPlayer.State"/>, usable without a ServerPlayer handle.</summary>
+    public static StateBag ForPlayer(int netId) => new StateBag($"player:{netId}");
+
     /// <summary>Sets a value. replicated=true → replicated to clients.</summary>
     public unsafe void Set(string key, object? value, bool replicated = true)
     {
+        ThreadGuard.AssertScriptThread("StateBag.Set"); // native SET_STATE_BAG_VALUE (#209)
         // Value as a SINGLE msgpack value (not an array). Raw through Native.Invoke with
         // a byte pointer -- the generated SetStateBagValue(string,...) would corrupt
         // binary data.
@@ -45,6 +55,7 @@ public sealed class StateBag
     /// <summary>Reads a value (server-side) — or null if not set.</summary>
     public unsafe object? Get(string key)
     {
+        ThreadGuard.AssertScriptThread("StateBag.Get"); // native GET_STATE_BAG_VALUE (#209)
         nint bag = Marshal.StringToCoTaskMemUTF8(_bagName ?? "");
         nint k = Marshal.StringToCoTaskMemUTF8(key ?? "");
         try
