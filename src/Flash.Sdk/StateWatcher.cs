@@ -52,6 +52,12 @@ public static class StateWatchers
     private static readonly Dictionary<string, List<int>> s_cookies = new();
     private static readonly Dictionary<string, Dictionary<string, object?>> s_lastValues = new();
     private static readonly HashSet<string> s_dropWired = new();
+    // Guards the three dictionaries above. The change callback runs INLINE on whatever
+    // thread invokes the funcref — thread-pool delivery is possible (replicated changes /
+    // off-thread setters), so an unlocked Dictionary would race the script-thread mutations
+    // in RegisterAll/ClearResource/drop-cleanup ("Collection was modified" or corruption).
+    // Same decision as State.cs's s_onChangeLock (#148). (#175)
+    private static readonly object s_lock = new();
 
     /// <summary>
     /// Registers every <c>[StateWatcher]</c>-annotated method of <paramref name="target"/>
@@ -62,15 +68,28 @@ public static class StateWatchers
     {
         string resource = global::Flash.Natives.Cfx.GetCurrentResourceName() ?? "";
 
+        // A Type argument (static/utility classes) scans that type directly; an object
+        // scans its runtime type — previously typeof(X) silently registered nothing (#180).
+        var (type, instance) = RouterTarget.Resolve(target);
+
         // Group methods by watched key so one native handler serves all watchers of a key.
-        var byKey = new Dictionary<string, List<(MethodInfo Method, object Target)>>();
-        foreach (var m in target.GetType().GetMethods(
+        var byKey = new Dictionary<string, List<(MethodInfo Method, object? Target)>>();
+        foreach (var m in type.GetMethods(
             BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static))
-            foreach (var w in m.GetCustomAttributes<StateWatcherAttribute>())
+        {
+            var watchers = m.GetCustomAttributes<StateWatcherAttribute>().ToArray();
+            if (watchers.Length == 0) continue;
+            RouterTarget.RequireInvokable(m, instance, "StateWatchers");
+            // Fail FAST on a misused [FromSource] (unsupported type) at registration — same
+            // rule as the event router (#171). Without this, Bind hands null to a non-nullable
+            // parameter and method.Invoke throws an ArgumentException on EVERY dispatch (#177).
+            Events.ValidateFromSourceParams(m, m.GetParameters());
+            foreach (var w in watchers)
             {
                 if (!byKey.TryGetValue(w.Key, out var list)) byKey[w.Key] = list = new();
-                list.Add((m, target));
+                list.Add((m, instance));
             }
+        }
         if (byKey.Count == 0) return;
 
         EnsureDropCleanup(resource);
@@ -83,23 +102,32 @@ public static class StateWatchers
                 Dispatch(resource, key, methods, callArgs);
                 return null;
             });
-            if (!s_cookies.TryGetValue(resource, out var cookies)) s_cookies[resource] = cookies = new();
-            cookies.Add(cookie);
+            lock (s_lock)
+            {
+                if (!s_cookies.TryGetValue(resource, out var cookies)) s_cookies[resource] = cookies = new();
+                cookies.Add(cookie);
+            }
         }
     }
 
     // The native change callback: [bagName, key, value, reserved, replicated].
     private static void Dispatch(string resource, string key,
-        List<(MethodInfo Method, object Target)> methods, object?[] callArgs)
+        List<(MethodInfo Method, object? Target)> methods, object?[] callArgs)
     {
         string bagName = callArgs.Length > 0 ? callArgs[0]?.ToString() ?? "" : "";
         object? newValue = callArgs.Length > 2 ? callArgs[2] : null;
 
         // Old value from the per-resource cache, then store the new one for next time.
+        // Under s_lock: this can run on a thread-pool thread concurrently with the
+        // script-thread cleanup paths (#175).
         string cacheKey = bagName + "\0" + key;
-        if (!s_lastValues.TryGetValue(resource, out var cache)) s_lastValues[resource] = cache = new();
-        cache.TryGetValue(cacheKey, out object? oldValue);
-        cache[cacheKey] = newValue;
+        object? oldValue;
+        lock (s_lock)
+        {
+            if (!s_lastValues.TryGetValue(resource, out var cache)) s_lastValues[resource] = cache = new();
+            cache.TryGetValue(cacheKey, out oldValue);
+            cache[cacheKey] = newValue;
+        }
 
         int netId = ParseNetId(bagName);
 
@@ -119,6 +147,14 @@ public static class StateWatchers
                 {
                     Log.Error($"StateWatcher '{key}' threw: {tie.InnerException?.Message ?? tie.Message}");
                     Diagnostics.Report($"statewatcher:{key}", tie.InnerException ?? tie);
+                }
+                catch (Exception ex)
+                {
+                    // Reflection-layer failures (e.g. an ArgumentException from a signature the
+                    // binder can't satisfy) are NOT TargetInvocationException — without this
+                    // they'd escape the dispatch and crash the script thread (#177).
+                    Log.Error($"StateWatcher '{key}' invocation failed: {ex.Message}");
+                    Diagnostics.Report($"statewatcher:{key}", ex);
                 }
             }
         });
@@ -169,14 +205,17 @@ public static class StateWatchers
     // so the oldValue cache can't grow with stale "player:<id>" entries. Core-origin only (#168).
     private static void EnsureDropCleanup(string resource)
     {
-        if (!s_dropWired.Add(resource)) return;
+        lock (s_lock) { if (!s_dropWired.Add(resource)) return; }
         Events.On("playerDropped", _ =>
         {
             if (!Events.IsFromCore) return;
-            if (!s_lastValues.TryGetValue(resource, out var cache)) return;
-            string prefix = "player:" + Events.SourceNetId + "\0";
-            var stale = cache.Keys.Where(k => k.StartsWith(prefix, StringComparison.Ordinal)).ToList();
-            foreach (var k in stale) cache.Remove(k);
+            lock (s_lock)
+            {
+                if (!s_lastValues.TryGetValue(resource, out var cache)) return;
+                string prefix = "player:" + Events.SourceNetId + "\0";
+                var stale = cache.Keys.Where(k => k.StartsWith(prefix, StringComparison.Ordinal)).ToList();
+                foreach (var k in stale) cache.Remove(k);
+            }
         });
     }
 
@@ -194,10 +233,17 @@ public static class StateWatchers
     /// captured watcher delegates so the collectible ALC can unload).</summary>
     internal static void ClearResource(string resource)
     {
-        if (s_cookies.Remove(resource, out var cookies))
+        // Mutate the registries under the lock, but fire the removal natives OUTSIDE it
+        // (no lock held across a host call). (#175)
+        List<int>? cookies;
+        lock (s_lock)
+        {
+            s_cookies.Remove(resource, out cookies);
+            s_lastValues.Remove(resource);
+            s_dropWired.Remove(resource);
+        }
+        if (cookies != null)
             foreach (int cookie in cookies)
                 try { global::Flash.Natives.Cfx.RemoveStateBagChangeHandler(cookie); } catch { }
-        s_lastValues.Remove(resource);
-        s_dropWired.Remove(resource);
     }
 }

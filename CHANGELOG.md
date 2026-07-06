@@ -8,6 +8,7 @@ stable plugin ABI).
 
 | Flash release | Flash.Sdk (NuGet) | Core contract | FXServer artifact (Windows) |
 |---|---|---|---|
+| 0.5.1 | 0.5.1 | v12 | **31689** (`06d4d348c`) |
 | 0.5.0 | 0.5.0 | v12 | **31689** (`06d4d348c`) |
 | 0.4.1 | 0.4.1 | v12 | **31689** (`06d4d348c`) |
 | 0.4.0 | 0.4.0 | v12 | **31689** (`06d4d348c`) |
@@ -21,6 +22,41 @@ Rules:
   fine (the contract only grows by appending).
 - **Payload ↔ artifact:** pinned exactly. A different artifact version needs a payload
   release built for it.
+
+## [0.5.1] — 2026-07-06
+
+Bugfix release: eight verified findings from the post-0.5.0 audits (#175–#182), all
+confirmed against the source and fixed. **Not managed-only**: the native core and the
+scripting component changed too (grid leak, invoke bounds check, runtime-handle reset) —
+the payload ships a rebuilt `citizen-scripting-flash.dll` + core; the core contract (v12)
+and the FXServer artifact pin (31689) are unchanged. Everything verified in the real
+release FXServer (full `flash-core`/`flash-admin` selftest suites green).
+
+**SDK (Flash.Sdk)**
+- `StateWatchers.RegisterAll` fails fast on `[FromSource]` parameters with unsupported
+  types (same rule as the event router, #171), and the dispatch catches reflection-layer
+  exceptions — a bad watcher signature can no longer crash the script thread. (#177)
+- StateWatcher registries (`s_cookies`/`s_lastValues`/`s_dropWired`) are serialized under
+  a lock against off-thread change-callback races — same pattern as `State.cs` (#148). (#175)
+- `Exports.Register`/`Exports.Call` assert the script thread and fail fast off-thread
+  (consistent with `Rpc.Client` #169 and the DB layer #89). (#178)
+- `RegisterAll(typeof(X))` now works for static/utility classes across all four attribute
+  routers (Commands/Events/Exports/StateWatchers) instead of silently registering nothing;
+  annotated instance methods without an instance are rejected at registration. (#180)
+
+**Native core / component**
+- Spatial grid: empty cells are fully torn down on removal (list freed + map entry
+  removed) — fixes the unbounded empty-cell accumulation on long-running servers. (#179)
+- `coreInvokeObject` rejects argument counts outside 0..32 up front instead of passing
+  the original count past the 32-slot stack buffer (out-of-bounds stack read). (#181)
+- `FlashRuntime::Destroy()` resets the active runtime handle to null so the Zig core is
+  never left pointing at a freed runtime (use-after-free). (#182)
+
+**Tooling (Flash.LuaDefGen)**
+- `ValueTask`/`ValueTask<T>` returns unwrap like `Task`/`Task<T>` instead of mapping to
+  `table`; generic methods get correct compiler doc-IDs (arity suffix + backtick parameter
+  refs) so overloaded generic exports keep their XML docs; the resolver skips the runtime
+  dir cleanly when `Assembly.Location` is empty (single-file publish). (#176)
 
 ## [0.5.0] — 2026-07-05
 

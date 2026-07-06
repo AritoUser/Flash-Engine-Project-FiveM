@@ -80,7 +80,13 @@ internal static class Program
         Add(args.AssemblyPath);
         foreach (var sdk in args.SdkPaths) Add(sdk);
         foreach (var f in Directory.GetFiles(Path.GetDirectoryName(Path.GetFullPath(args.AssemblyPath))!, "*.dll")) Add(f);
-        foreach (var f in Directory.GetFiles(Path.GetDirectoryName(typeof(object).Assembly.Location)!, "*.dll")) Add(f);
+        // Assembly.Location is EMPTY under single-file publish / virtualized hosts —
+        // Path.GetDirectoryName("") returns null and Directory.GetFiles(null) would crash
+        // the whole post-build step. The runtime dir is only one of several resolver
+        // sources, so skipping it is safe. (#176)
+        string coreLoc = typeof(object).Assembly.Location;
+        if (!string.IsNullOrEmpty(coreLoc) && Path.GetDirectoryName(coreLoc) is string coreDir && Directory.Exists(coreDir))
+            foreach (var f in Directory.GetFiles(coreDir, "*.dll")) Add(f);
         foreach (var f in Directory.GetFiles(AppContext.BaseDirectory, "*.dll")) Add(f);
 
         var resolver = new PathAssemblyResolver(paths.Values);
@@ -240,9 +246,12 @@ internal static class LuaType
     public static string? MapReturn(Type t)
     {
         if (t.FullName == "System.Void") return null;
-        // Task / Task<T>: exports are synchronous from the Lua side; unwrap for the annotation.
-        if (t.FullName == "System.Threading.Tasks.Task") return null;
-        if (t.IsGenericType && t.GetGenericTypeDefinition().FullName == "System.Threading.Tasks.Task`1")
+        // Task/Task<T> and ValueTask/ValueTask<T>: exports are synchronous from the Lua
+        // side; unwrap for the annotation. Without the ValueTask cases the generic Map
+        // fallback documented them as 'table' instead of the real payload type. (#176)
+        if (t.FullName is "System.Threading.Tasks.Task" or "System.Threading.Tasks.ValueTask") return null;
+        if (t.IsGenericType && t.GetGenericTypeDefinition().FullName
+                is "System.Threading.Tasks.Task`1" or "System.Threading.Tasks.ValueTask`1")
             return Map(t.GetGenericArguments()[0]);
         return Map(t);
     }
@@ -291,19 +300,27 @@ internal sealed class XmlDocs
         return byPrefix.Count == 1 ? byPrefix[0].Value : s_empty;
     }
 
-    // Builds the compiler's doc-comment ID: M:Namespace.Type.Method(Param1,Param2).
+    // Builds the compiler's doc-comment ID: M:Namespace.Type.Method(Param1,Param2);
+    // generic methods carry the arity suffix, e.g. M:Type.Method``1(``0). (#176)
     internal static string DocId(MethodInfo m)
     {
         string type = (m.DeclaringType?.FullName ?? "").Replace('+', '.');
+        string name = m.Name + (m.IsGenericMethod ? "``" + m.GetGenericArguments().Length : "");
         var ps = m.GetParameters();
-        if (ps.Length == 0) return $"M:{type}.{m.Name}";
-        return $"M:{type}.{m.Name}({string.Join(",", ps.Select(p => TypeId(p.ParameterType)))})";
+        if (ps.Length == 0) return $"M:{type}.{name}";
+        return $"M:{type}.{name}({string.Join(",", ps.Select(p => TypeId(p.ParameterType)))})";
     }
 
     private static string TypeId(Type t)
     {
         if (t.IsByRef) return TypeId(t.GetElementType()!) + "@";
         if (t.IsArray) return TypeId(t.GetElementType()!) + "[]";
+        // Generic parameters use the compiler's backtick index — ``n for method-level,
+        // `n for class-level. The old FullName fallback emitted the literal name ("T"),
+        // so overloaded generic methods missed BOTH the exact and the unique-prefix
+        // lookup and lost their XML docs. (#176)
+        if (t.IsGenericParameter)
+            return (t.DeclaringMethod != null ? "``" : "`") + t.GenericParameterPosition;
         if (t.IsGenericType)
         {
             string def = (t.GetGenericTypeDefinition().FullName ?? "").Replace('+', '.');

@@ -56,11 +56,15 @@ public static partial class Commands
     /// </summary>
     public static void RegisterAll(object target)
     {
-        foreach (var m in target.GetType().GetMethods(
+        // A Type argument (static/utility classes) scans that type directly; an object
+        // scans its runtime type — previously typeof(X) silently registered nothing (#180).
+        var (type, instance) = RouterTarget.Resolve(target);
+        foreach (var m in type.GetMethods(
             BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static))
         {
             var attr = m.GetCustomAttribute<CommandAttribute>();
             if (attr == null) continue;
+            RouterTarget.RequireInvokable(m, instance, "Commands");
 
             var method = m;                       // capture
             var ps = m.GetParameters();
@@ -88,7 +92,7 @@ public static partial class Commands
                 }
                 try
                 {
-                    object? result = method.Invoke(method.IsStatic ? null : target, call);
+                    object? result = method.Invoke(method.IsStatic ? null : instance, call);
                     if (result is Task task) _ = ObserveAsync(task, attr.Name);
                 }
                 catch (TargetInvocationException tie)

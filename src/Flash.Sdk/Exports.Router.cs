@@ -43,11 +43,15 @@ public static partial class Exports
     /// </summary>
     public static void RegisterAll(object target)
     {
-        foreach (var m in target.GetType().GetMethods(
+        // A Type argument (static/utility classes) scans that type directly; an object
+        // scans its runtime type — previously typeof(X) silently registered nothing (#180).
+        var (type, instance) = RouterTarget.Resolve(target);
+        foreach (var m in type.GetMethods(
             BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static))
         {
             var exports = m.GetCustomAttributes<FlashExportAttribute>().ToArray();
             if (exports.Length == 0) continue;
+            RouterTarget.RequireInvokable(m, instance, "Exports");
 
             var method = m;                       // capture
             var ps = m.GetParameters();
@@ -60,7 +64,7 @@ public static partial class Exports
                     object?[] call = BindArgs(ps, args);
                     try
                     {
-                        return method.Invoke(method.IsStatic ? null : target, call);
+                        return method.Invoke(method.IsStatic ? null : instance, call);
                     }
                     catch (TargetInvocationException tie)
                     {

@@ -18,9 +18,22 @@ public static partial class Exports
     // via GetCurrentResourceName at register time (correct because the active runtime is set).
     private static readonly Dictionary<string, Dictionary<string, Func<object?[], object?>>> s_exports = new();
 
+    // s_exports is a plain Dictionary and script-thread-only by design (like Events). A
+    // background thread touching it while a resource starts/stops would race the mutation
+    // ("Collection was modified" or worse). Fail fast off-thread — same decision as
+    // Rpc.Client (#169) and the DB layer (#89). (#178)
+    private static void AssertScriptThread(string api)
+    {
+        if (System.Threading.SynchronizationContext.Current is not FlashSyncContext)
+            throw new InvalidOperationException(
+                $"{api} must run on the script thread (inside a resource handler/tick). " +
+                "Dispatch background work back to the script thread first.");
+    }
+
     /// <summary>Provides an export with a return value.</summary>
     public static void Register(string name, Func<object?[], object?> handler)
     {
+        AssertScriptThread("Exports.Register");
         string res = global::Flash.Natives.Cfx.GetCurrentResourceName() ?? "";
         if (!s_exports.TryGetValue(res, out var byName))
         {
@@ -69,6 +82,7 @@ public static partial class Exports
     /// resource's scheduler. Irrelevant for synchronous handlers (the normal case).</summary>
     public static object? Call(string resource, string name, params object?[] args)
     {
+        AssertScriptThread("Exports.Call");
         if (s_exports.TryGetValue(resource, out var byName) && byName.TryGetValue(name, out var handler))
             return handler(args ?? Array.Empty<object?>());
         throw new InvalidOperationException($"Export '{name}' of resource '{resource}' not found.");
