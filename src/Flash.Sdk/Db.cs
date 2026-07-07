@@ -129,6 +129,36 @@ public static class Db
         return Convert.ToInt64(idCmd.ExecuteScalar());
     }
 
+    /// <summary>
+    /// Several commands on ONE connection inside ONE transaction, synchronously — the
+    /// sync twin of <see cref="ExecuteBatchAsync"/> for the shutdown path (OnStop, where
+    /// async continuations no longer run, #211). All-or-nothing: on any error everything
+    /// is rolled back and the exception propagates. Returns total affected rows.
+    /// </summary>
+    public static int ExecuteBatch(params (string Sql, object?[] Args)[] commands)
+    {
+        var p = Resolve();
+        using var con = p.Open();
+        using var tx = con.BeginTransaction();
+        try
+        {
+            int affected = 0;
+            foreach (var (sql, args) in commands)
+            {
+                using var cmd = Prepare(con, sql, args);
+                cmd.Transaction = tx;
+                affected += cmd.ExecuteNonQuery();
+            }
+            tx.Commit();
+            return affected;
+        }
+        catch
+        {
+            tx.Rollback(); // explicit rather than implicit via Dispose -> clear semantics
+            throw;
+        }
+    }
+
     // === Async API (thread pool; the await resumes on the script thread) ============
 
     /// <summary>Like <see cref="Execute"/>, but without blocking the server frame.</summary>
@@ -221,7 +251,7 @@ public static class Db
             }
             catch
             {
-                await tx.RollbackAsync(); // explizit statt implizit via Dispose -> klare Semantik
+                await tx.RollbackAsync(); // explicit rather than implicit via Dispose -> clear semantics
                 throw;
             }
         });

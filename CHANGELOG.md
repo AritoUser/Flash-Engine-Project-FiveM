@@ -8,7 +8,8 @@ stable plugin ABI).
 
 | Flash release | Flash.Sdk (NuGet) | Core contract | FXServer artifact (Windows) |
 |---|---|---|---|
-| 0.6.0 | 0.6.0 | **v13** | **31689** (`06d4d348c`) |
+| 0.7.0 | 0.7.0 | **v15** | **31689** (`06d4d348c`) |
+| 0.6.0 | 0.6.0 | v13 | **31689** (`06d4d348c`) |
 | 0.5.1 | 0.5.1 | v12 | **31689** (`06d4d348c`) |
 | 0.5.0 | 0.5.0 | v12 | **31689** (`06d4d348c`) |
 | 0.4.1 | 0.4.1 | v12 | **31689** (`06d4d348c`) |
@@ -23,6 +24,54 @@ Rules:
   fine (the contract only grows by appending).
 - **Payload ↔ artifact:** pinned exactly. A different artifact version needs a payload
   release built for it.
+
+## [0.7.0] — 2026-07-07
+
+Inventory feature & hardening release closing the #213–#245 batch (30 implemented, 2
+rejected as not-applicable/redundant). **This is a PAYLOAD release, not managed-only**: the
+core contract grows **v13 → v15** (append-only), so the payload ships a rebuilt
+`citizen-scripting-flash.dll` + core; a v15 SDK requires the v15 core. The FXServer artifact
+pin (**31689**) is unchanged. Every item is covered by a `flash-core` selftest and is green
+in the real release FXServer; the server-side distance gate is additionally confirmed in-game
+(near → allowed, 100 m → rejected).
+
+### Security & reliability (core contract v14)
+- **Item registry & native hash filter** (#242/#245): once a server registers its item
+  catalog (`items.json`), the core rejects any unregistered item hash *before* allocating —
+  killing cheat-spawned items and hash-spam memory exhaustion at the native boundary. Opt-in:
+  without a catalog the previous behaviour is unchanged.
+- **Atomic weight/slot limits** (#213) enforced under the same lock as the mutation (no
+  check-then-act race), plus **busy/locked container flags** (#240/#224) with a 30 s crash
+  failsafe.
+- **Persistence hardening** (#240/#244): per-container serialization + a busy flag around
+  every load/save closes the item-loss window in the async gap; each save runs in one SQL
+  transaction.
+- **Quantity sanity cap** (#243): a negative int cast to `uint` is rejected instead of
+  minting ~4 billion items. Rejections now surface a reason (`InvResult`); the classic
+  bool/void APIs stay source-compatible.
+
+### Inventory features (core contract v15)
+- **Atomic batch primitive** (#233): one all-or-nothing takes+gives transaction — the
+  foundation for **crafting** (#223), **atomic trades** (#225) and the `InventoryTransaction`
+  unit-of-work scope.
+- **Unique item instances + metadata** (#214): weapons/keys/bags as server-generated u64
+  instances (the id doubles as the serial), with an `inventory_instances` table; the core
+  owns the atomic location truth, metadata lives in C#/DB.
+- **Category filters** (#218), **change events** (#220), and **nested containers** (#216).
+
+### Gameplay & security layer (flash-core)
+- **Container access pipeline** (#224/#238/#239): session → rate-limit → distance → ACL/keys
+  for every player-driven interaction, blocking remote-looting and macro-spam; violations
+  raise `flashfw:invViolation` (flag-and-log, no auto-ban).
+- **Audit logging** (#227), **loot tables** (#228), **ground drops** in a memory-only band
+  (#221/#219), **duplication alerts** (#241), and opt-in **state-bag sync** (#215).
+- **Lazy item decay** (#222) for unique items, **container sessions** (#236, server half),
+  and DX helpers: rejection messages (#235), snapshot queries (#231), a fluent container
+  builder (#230), category `[ItemHandler]`s with metadata injection (#232), and a
+  `/dumpitems` constants generator (#234).
+
+Not applicable: #226 (no slot/stack model to consolidate), #229 (a split is already the
+atomic `move`).
 
 ## [0.6.0] — 2026-07-06
 
