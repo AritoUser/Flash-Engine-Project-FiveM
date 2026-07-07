@@ -1,4 +1,4 @@
-Flash-Engine payload 0.7.0
+Flash-Engine payload 0.7.1
 Pinned FXServer artifact: see the release notes / CHANGELOG compatibility matrix.
 
 Install (from this folder):

@@ -23,7 +23,7 @@
          package ONLY for compilation; at runtime the host provides the shared instance
          (hence ExcludeAssets=runtime / Private=false in the resource csproj). -->
     <PackageId>Flash.Sdk</PackageId>
-    <Version>0.7.0</Version>
+    <Version>0.7.1</Version>
     <Authors>Flash-Engine</Authors>
     <Description>Public C# SDK of Flash-Engine (a FiveM server framework): write server-side resources in modern C# -- events, players, commands, deferrals, state bags, exports, database, natives.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>

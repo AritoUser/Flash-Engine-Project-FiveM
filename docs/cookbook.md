@@ -250,19 +250,54 @@ set flash_anti_vpn_reject_if "\"proxy\":\"yes\""
 ## Spawn at the last saved position
 
 `flash-core` samples every online player's position server-side (OneSync) — on
-each auto-save tick and on disconnect — and stores it per character. Its client
-script asks the server where to spawn: rejoining players continue where they
-left; a fresh character (no saved position) uses the spawnmanager's default
-spawn points, as do respawns after death.
+each auto-save tick and on disconnect — and stores it per character. It exposes a
+**neutral spawn contract** and lets a swappable *adapter* do the actual spawn:
+rejoining players continue where they left; a fresh character (no saved position)
+uses the adapter's default spawn point, as do respawns after death.
 
-Requirements: `spawnmanager` running, and `ensure flash-core` AFTER
-`basic-gamemode` (flash-core takes over the auto-spawn callback — last one
-wins). Server-side, the current position is also queryable:
+The shipped default adapter (`spawn_spawnmanager.lua`) uses the standard
+`spawnmanager`. It's a **soft** dependency now: `ensure flash-core` after
+`basic-gamemode` still works, but if spawnmanager is missing the adapter just logs
+and disables instead of blocking startup. Server-side the position is queryable:
 
 ```csharp
 var pos = Exports.Call<Dictionary<string, object?>>("flash-core", "getPosition", netId);
 // { x, y, z, heading } or null (no ped / never sampled)
 ```
+
+### Bring your own spawn (character select, custom UI)
+
+Disable the default adapter with a **replicated** convar and handle the contract
+in your own resource — no forking flash-core:
+
+```cfg
+setr flash_spawn_adapter "custom"   # (or "none") — stops spawn_spawnmanager.lua
+```
+
+```lua
+-- client, your resource:
+--   server -> client: flashfw:spawnAt(x, y, z, heading, hasPos)  where to spawn
+--                      (hasPos=false -> use your own default point)
+--   client -> server: TriggerServerEvent('flashfw:requestSpawn')  once ready to spawn
+RegisterNetEvent('flashfw:spawnAt', function(x, y, z, heading, hasPos)
+    -- your character-select / custom spawn goes here
+end)
+```
+
+## Route command replies to your own chat
+
+By default, `[Command]` replies and `flash-core`/`flash-admin` messages go to the
+standard `chat:addMessage`. To send them through ox_lib or a custom NUI chat, set a
+process-global reply sink once (e.g. in your core resource's `OnStart`):
+
+```csharp
+Commands.SetReplySink((netId, message) =>
+    Players.Get(netId).Emit("ox_lib:notify", new Dictionary<string, object?> { ["description"] = message }));
+// Commands.SetReplySink(null) restores the default chat:addMessage.
+```
+
+It's the single instance shared across resources, so this one override captures every
+resource's command replies; it's auto-cleared when the setting resource stops.
 
 ## Transactional inventory (un-dupeable)
 

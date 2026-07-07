@@ -7,7 +7,7 @@
        the template content is packed as content/. -->
   <PropertyGroup>
     <PackageId>Flash.Templates</PackageId>
-    <Version>0.7.0</Version>
+    <Version>0.7.1</Version>
     <Title>Flash-Engine Templates</Title>
     <Authors>Flash-Engine</Authors>
     <Description>dotnet new templates for Flash-Engine: server-side FiveM resources in C# (flash-resource).</Description>

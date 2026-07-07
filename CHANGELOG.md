@@ -8,6 +8,7 @@ stable plugin ABI).
 
 | Flash release | Flash.Sdk (NuGet) | Core contract | FXServer artifact (Windows) |
 |---|---|---|---|
+| 0.7.1 | 0.7.1 | v15 | **31689** (`06d4d348c`) |
 | 0.7.0 | 0.7.0 | **v15** | **31689** (`06d4d348c`) |
 | 0.6.0 | 0.6.0 | v13 | **31689** (`06d4d348c`) |
 | 0.5.1 | 0.5.1 | v12 | **31689** (`06d4d348c`) |
@@ -24,6 +25,35 @@ Rules:
   fine (the contract only grows by appending).
 - **Payload ↔ artifact:** pinned exactly. A different artifact version needs a payload
   release built for it.
+
+## [0.7.1] — 2026-07-07
+
+Decoupling release: standard FXServer resources that flash-core baked in are now handled
+like everything else in the engine — **the core gives the base, the engine user does the
+act** (same philosophy as the inventory system). **Managed-only**: no native change, the
+core contract stays **v15** and the FXServer artifact pin (**31689**) is unchanged; a v15
+core still runs. Existing servers need no config — the shipped defaults reproduce the old
+behaviour exactly.
+
+### Swappable spawn adapter (flash-core)
+- flash-core no longer performs the spawn itself or hard-`dependency`s `spawnmanager`. It
+  now owns only the server-authoritative **position persistence** + a **neutral spawn
+  contract** (`flashfw:requestSpawn` ⇄ `flashfw:spawnAt`). The spawnmanager glue moved into
+  a separate, optional adapter (`spawn_spawnmanager.lua`) that is the shipped default *and*
+  the reference implementation.
+- Write your own spawn (character select, custom UI, or no spawnmanager) without forking:
+  `setr flash_spawn_adapter "custom"` disables the default adapter and you handle
+  `flashfw:spawnAt` yourself. `spawnmanager` is now a **soft** dependency — the adapter waits
+  briefly for it and disables cleanly with a log line if it's absent, instead of blocking
+  startup.
+
+### Overridable command reply sink (Flash.Sdk)
+- New `Commands.SetReplySink((netId, message) => …)` / `Commands.ReplyTo(...)`: route command
+  replies to ox_lib / a custom NUI chat instead of the standard `chat:addMessage`. Default
+  (unset) is byte-identical to before. Process-global (the SDK is one shared instance),
+  auto-cleared when the setting resource stops so its delegate can't dangle past unload.
+  `flash-core` and `flash-admin` now emit their player replies through it, so a single
+  server-side override captures those too.
 
 ## [0.7.0] — 2026-07-07
 

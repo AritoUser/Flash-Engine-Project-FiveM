@@ -47,17 +47,55 @@ public readonly struct CommandContext
 
     public CommandContext(int source, string raw) { Source = source; Raw = raw; }
 
-    /// <summary>Replies to the caller: chat message for players, log line for the console.</summary>
+    /// <summary>Replies to the caller: chat message for players, log line for the console.
+    /// Player replies go through <see cref="Commands.ReplyTo"/>, so a server-provided
+    /// <see cref="Commands.SetReplySink"/> (ox_lib / custom NUI chat) captures them too.</summary>
     public void Reply(string message)
     {
         if (Source == 0) Log.Info(message);
-        else Events.EmitClient(Source, "chat:addMessage",
-            new System.Collections.Generic.Dictionary<string, object?> { ["args"] = new object?[] { message } });
+        else Commands.ReplyTo(Source, message);
     }
 }
 
 public static partial class Commands
 {
+    // ---- Reply sink (overridable chat delivery, #decouple) --------------------------
+    // How a command reply reaches a PLAYER. Default (unset) emits the standard FiveM
+    // `chat:addMessage`; set a sink to route replies to ox_lib / a custom NUI chat instead.
+    // Console replies (source 0) always go to the server log, never through the sink.
+    //
+    // PROCESS-GLOBAL by design: the SDK is ONE shared instance across every resource (the
+    // host hands the same Flash.Sdk to each resource ALC), so this override applies to ALL
+    // resources' command replies -- exactly what a server wants when it swaps its chat.
+    // Last writer wins; intended to be set once by the server's core/chat resource. The
+    // owner is tracked so the sink is auto-cleared when THAT resource stops -- otherwise a
+    // stopped resource's delegate would dangle and pin its (unloadable) ALC.
+    private static Action<int, string>? s_replySink;
+    private static string? s_replySinkOwner;
+
+    /// <summary>Overrides how command replies reach players: <c>sink(netId, message)</c>.
+    /// Pass <c>null</c> to restore the default <c>chat:addMessage</c> delivery. Process-global
+    /// (see remarks in source); auto-cleared when the calling resource stops.</summary>
+    public static void SetReplySink(Action<int, string>? sink)
+    {
+        s_replySink = sink;
+        s_replySinkOwner = sink == null ? null : (global::Flash.Natives.Cfx.GetCurrentResourceName() ?? "");
+    }
+
+    /// <summary>Delivers a chat reply to a player through the active <see cref="SetReplySink"/>,
+    /// or the default <c>chat:addMessage</c> when none is set. <paramref name="author"/> is the
+    /// optional chat author tag (e.g. <c>"[flash]"</c>); resources that emit their own player
+    /// chat should call this instead of hand-emitting <c>chat:addMessage</c>, so a server's
+    /// sink override captures them too. For the server console, use <see cref="Log"/> directly.</summary>
+    public static void ReplyTo(int netId, string message, string? author = null)
+    {
+        var sink = s_replySink;
+        if (sink != null) { sink(netId, author != null ? $"{author} {message}" : message); return; }
+        var args = author != null ? new object?[] { author, message } : new object?[] { message };
+        Events.EmitClient(netId, "chat:addMessage",
+            new System.Collections.Generic.Dictionary<string, object?> { ["args"] = args });
+    }
+
     /// <summary>
     /// Registers every <c>[Command]</c>-annotated method of <paramref name="target"/>
     /// (public + non-public, instance + static). Supported parameter types:
@@ -187,6 +225,9 @@ public static partial class Commands
     /// themselves die with the funcref registry). Called by the host.</summary>
     internal static void ClearResource(string resource)
     {
+        // Drop the reply sink if THIS resource set it -> its delegate can't dangle past
+        // unload (which would pin the collectible ALC and, after a restart, run stale code).
+        if (resource == s_replySinkOwner) { s_replySink = null; s_replySinkOwner = null; }
         s_initWired.Remove(resource);
         if (!s_suggestions.Remove(resource, out var list)) return;
         foreach (var (name, _, _) in list)
