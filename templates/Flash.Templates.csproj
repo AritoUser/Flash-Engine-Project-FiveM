@@ -2,15 +2,16 @@
 
   <!-- Packages the Flash-Engine `dotnet new` templates as a NuGet package.
        Usage (end users): `dotnet new install Flash.Templates` -> then
-       `dotnet new flash-resource -n YourName`.
+       `dotnet new flash-resource -n YourName`  (or `flash-charcreator`).
        This is NOT a normal assembly project: PackageType=Template, no build output,
-       the template content is packed as content/. -->
+       the template content is packed as content/. Each template lives in its own folder
+       with its own .template.config; add the folder to the Content include below. -->
   <PropertyGroup>
     <PackageId>Flash.Templates</PackageId>
-    <Version>0.7.1</Version>
+    <Version>0.8.0</Version>
     <Title>Flash-Engine Templates</Title>
     <Authors>Flash-Engine</Authors>
-    <Description>dotnet new templates for Flash-Engine: server-side FiveM resources in C# (flash-resource).</Description>
+    <Description>dotnet new templates for Flash-Engine: server-side FiveM resources in C# (flash-resource, flash-charcreator).</Description>
     <PackageTags>dotnet-new;templates;fivem;flash-engine;csharp</PackageTags>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
 
@@ -29,6 +30,7 @@
 
   <ItemGroup>
     <Content Include="csharp-resource\**\*" Exclude="csharp-resource\**\bin\**;csharp-resource\**\obj\**" />
+    <Content Include="charcreator-resource\**\*" Exclude="charcreator-resource\**\bin\**;charcreator-resource\**\obj\**" />
     <Compile Remove="**\*" />
   </ItemGroup>
 

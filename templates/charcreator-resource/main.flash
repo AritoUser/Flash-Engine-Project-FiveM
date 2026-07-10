@@ -1,0 +1,2 @@
+-- Marker file (content irrelevant). Triggers HandlesFile(".flash") -> Create -> LoadFile.
+-- The actual server code lives in <ResourceName>.dll (same folder).

@@ -255,10 +255,24 @@ each auto-save tick and on disconnect — and stores it per character. It expose
 rejoining players continue where they left; a fresh character (no saved position)
 uses the adapter's default spawn point, as do respawns after death.
 
-The shipped default adapter (`spawn_spawnmanager.lua`) uses the standard
-`spawnmanager`. It's a **soft** dependency now: `ensure flash-core` after
-`basic-gamemode` still works, but if spawnmanager is missing the adapter just logs
-and disables instead of blocking startup. Server-side the position is queryable:
+The shipped default adapter (`spawn_native.lua`) is **fully self-contained** — pure
+GTA natives, no other resource. `ensure flash-core` on its own puts a player in the
+world; you do **not** need `spawnmanager` or `basic-gamemode`. The default spawn point
+(used for a brand-new character and for auto-respawn) is Legion Square and is
+convar-tunable:
+
+```cfg
+setr flash_spawn_x  195.17
+setr flash_spawn_y  -933.77
+setr flash_spawn_z  30.69
+setr flash_spawn_h  144.0
+setr flash_spawn_model  ""           # e.g. "mp_m_freemode_01"; empty = keep current model
+setr flash_spawn_autorespawn "true"  # auto-respawn at the default point on death
+```
+
+Prefer the old behaviour? A legacy bridge to the standard `spawnmanager` still ships —
+opt in with `setr flash_spawn_adapter "spawnmanager"`. Server-side the position is
+queryable regardless of adapter:
 
 ```csharp
 var pos = Exports.Call<Dictionary<string, object?>>("flash-core", "getPosition", netId);
@@ -271,7 +285,7 @@ Disable the default adapter with a **replicated** convar and handle the contract
 in your own resource — no forking flash-core:
 
 ```cfg
-setr flash_spawn_adapter "custom"   # (or "none") — stops spawn_spawnmanager.lua
+setr flash_spawn_adapter "custom"   # (or "none") — no built-in adapter runs
 ```
 
 ```lua

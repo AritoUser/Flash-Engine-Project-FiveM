@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Character-creator resource for Flash-Engine: SERVER half only (C#).
+       The client half (client.lua + html/) ships alongside the DLL in the resource
+       folder. Created via `dotnet new flash-charcreator -n YourName` (everything is
+       renamed). <AssemblyName> == resource folder name (convention <name>.dll). -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>MyCharcreator</AssemblyName>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Only the public SDK, as a NuGet package. ExcludeAssets=runtime + Private=false
+         -> NO DLL is copied to the output (the Flash host provides the ONE shared
+         instance at runtime; a bundled copy would break type identity). We only compile
+         against the API and talk to flash-core over exports/RPC on the event bus. -->
+    <PackageReference Include="Flash.Sdk" Version="0.8.0">
+      <ExcludeAssets>runtime</ExcludeAssets>
+      <Private>false</Private>
+    </PackageReference>
+  </ItemGroup>
+
+</Project>

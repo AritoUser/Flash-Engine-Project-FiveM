@@ -8,7 +8,7 @@
     ".NETCoreApp,Version=v10.0": {
       "FlashHost/1.0.0": {
         "dependencies": {
-          "Flash.Sdk": "0.7.1"
+          "Flash.Sdk": "0.8.0"
         },
         "runtime": {
           "FlashHost.dll": {}
@@ -258,7 +258,7 @@
           }
         }
       },
-      "Flash.Sdk/0.7.1": {
+      "Flash.Sdk/0.8.0": {
         "dependencies": {
           "Microsoft.Data.Sqlite": "10.0.9",
           "MySqlConnector": "2.6.1",
@@ -266,8 +266,8 @@
         },
         "runtime": {
           "Flash.Sdk.dll": {
-            "assemblyVersion": "0.7.1.0",
-            "fileVersion": "0.7.1.0"
+            "assemblyVersion": "0.8.0.0",
+            "fileVersion": "0.8.0.0"
           }
         }
       }
@@ -349,7 +349,7 @@
       "path": "sqlitepclraw.provider.e_sqlite3/3.0.3",
       "hashPath": "sqlitepclraw.provider.e_sqlite3.3.0.3.nupkg.sha512"
     },
-    "Flash.Sdk/0.7.1": {
+    "Flash.Sdk/0.8.0": {
       "type": "project",
       "serviceable": false,
       "sha512": ""

@@ -1,0 +1,29 @@
+{
+  "$schema": "http://json.schemastore.org/template",
+  "author": "Flash-Engine",
+  "classifications": [ "FiveM", "Server", "C#", "Flash-Engine", "Character Creator" ],
+  "identity": "Flash.Charcreator.CSharp",
+  "name": "Flash-Engine Character Creator",
+  "description": "A character creator that hooks the flash-core spawn contract: hide on join, edit appearance (NUI), persist per character (cid), then spawn.",
+  "shortName": "flash-charcreator",
+  "tags": {
+    "language": "C#",
+    "type": "project"
+  },
+  "sourceName": "MyCharcreator",
+  "preferNameDirectory": true,
+  "sources": [
+    {
+      "modifiers": [
+        {
+          "exclude": [
+            "bin/**",
+            "obj/**",
+            "**/*.user",
+            ".template.config/**"
+          ]
+        }
+      ]
+    }
+  ]
+}

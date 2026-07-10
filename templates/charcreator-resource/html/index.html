@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Character Creator</title>
+<style>
+  /* Self-contained: no external fonts/assets so it works offline inside FiveM's NUI. */
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; font-family: "Segoe UI", system-ui, sans-serif; }
+  /* Hidden until the client sends {action:'open'} -> keeps the game visible on load. */
+  body { display: none; background: transparent; color: #f2f2f2; }
+  #panel {
+    position: absolute; top: 0; right: 0; height: 100%; width: 320px;
+    padding: 28px 24px; overflow-y: auto;
+    background: rgba(15, 17, 22, 0.92);
+    border-left: 1px solid rgba(255,255,255,0.08);
+    backdrop-filter: blur(4px);
+  }
+  h1 { margin: 0 0 4px; font-size: 20px; font-weight: 600; }
+  .sub { margin: 0 0 20px; font-size: 12px; color: #8a8f99; }
+  .row { margin: 16px 0; }
+  .row label { display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 6px; color: #c8ccd4; }
+  .row label .val { color: #7aa2ff; font-variant-numeric: tabular-nums; }
+  input[type=range] { width: 100%; accent-color: #7aa2ff; }
+  .genders { display: flex; gap: 8px; }
+  .genders button {
+    flex: 1; padding: 9px 0; font-size: 13px; cursor: pointer; color: #c8ccd4;
+    background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); border-radius: 6px;
+  }
+  .genders button.active { background: #7aa2ff; border-color: #7aa2ff; color: #0f1116; font-weight: 600; }
+  #enter {
+    width: 100%; margin-top: 26px; padding: 12px 0; font-size: 14px; font-weight: 600;
+    cursor: pointer; color: #0f1116; background: #7aa2ff; border: none; border-radius: 6px;
+  }
+  #enter:hover { background: #9ab6ff; }
+</style>
+</head>
+<body>
+  <div id="panel">
+    <h1>Create your character</h1>
+    <p class="sub">Adjust, then enter the world.</p>
+
+    <div class="row">
+      <label>Gender</label>
+      <div class="genders">
+        <button data-gender="male">Male</button>
+        <button data-gender="female">Female</button>
+      </div>
+    </div>
+
+    <!-- Each slider is wired generically from its id (= appearance key) + data-max. -->
+    <div class="row"><label>Face A <span class="val"></span></label><input type="range" id="father"    min="0" max="45"  data-max="45"></div>
+    <div class="row"><label>Face B <span class="val"></span></label><input type="range" id="mother"    min="0" max="45"  data-max="45"></div>
+    <div class="row"><label>Face mix <span class="val"></span></label><input type="range" id="faceMix"  min="0" max="100" data-max="100" data-scale="0.01"></div>
+    <div class="row"><label>Skin tone <span class="val"></span></label><input type="range" id="skin"    min="0" max="45"  data-max="45"></div>
+    <div class="row"><label>Hair <span class="val"></span></label><input type="range" id="hair"          min="0" max="73"  data-max="73"></div>
+    <div class="row"><label>Hair colour <span class="val"></span></label><input type="range" id="hairColor" min="0" max="63" data-max="63"></div>
+    <div class="row"><label>Eyebrows <span class="val"></span></label><input type="range" id="eyebrows"    min="0" max="33"  data-max="33"></div>
+
+    <button id="enter">Enter world</button>
+  </div>
+
+<script>
+  // Callback host = the EXACT resource name. GetParentResourceName() (injected by FiveM into
+  // NUI) returns it correctly cased; location.hostname is a fallback but can be lowercased,
+  // which breaks callback routing for a mixed-case resource name like "MyCharcreator".
+  const RES = (typeof GetParentResourceName === 'function') ? GetParentResourceName() : location.hostname;
+  const HOST = `https://${RES}`;
+  const SLIDERS = ['father','mother','faceMix','skin','hair','hairColor','eyebrows'];
+  let appearance = {};
+
+  function post(cb, data) {
+    fetch(`${HOST}/${cb}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json; charset=UTF-8' },
+      body: JSON.stringify(data || {})
+    }).catch(() => {}); // NUI callbacks always resolve; ignore transport errors
+  }
+
+  // Read the UI back into a plain appearance object (applying per-slider scale).
+  function collect() {
+    const a = { gender: appearance.gender || 'male' };
+    for (const id of SLIDERS) {
+      const el = document.getElementById(id);
+      const scale = parseFloat(el.dataset.scale || '1');
+      a[id] = scale === 1 ? parseInt(el.value, 10) : parseFloat(el.value) * scale;
+    }
+    return a;
+  }
+
+  function refreshLabels() {
+    for (const id of SLIDERS) {
+      const el = document.getElementById(id);
+      el.parentElement.querySelector('.val').textContent = el.value;
+    }
+  }
+
+  function setGender(g) {
+    appearance.gender = g;
+    document.querySelectorAll('.genders button').forEach(b =>
+      b.classList.toggle('active', b.dataset.gender === g));
+  }
+
+  // Push the whole appearance to the client for a live preview.
+  function sendUpdate() {
+    appearance = collect();
+    refreshLabels();
+    post('update', appearance);
+  }
+
+  // Fill the UI from an appearance table sent by the client.
+  function load(a) {
+    appearance = a || {};
+    setGender(appearance.gender || 'male');
+    for (const id of SLIDERS) {
+      const el = document.getElementById(id);
+      const scale = parseFloat(el.dataset.scale || '1');
+      const v = appearance[id] ?? 0;
+      el.value = scale === 1 ? v : Math.round(v / scale);
+    }
+    refreshLabels();
+  }
+
+  // Wire events.
+  SLIDERS.forEach(id => document.getElementById(id).addEventListener('input', sendUpdate));
+  document.querySelectorAll('.genders button').forEach(b =>
+    b.addEventListener('click', () => { setGender(b.dataset.gender); sendUpdate(); }));
+  document.getElementById('enter').addEventListener('click', () => post('confirm', collect()));
+
+  // Messages from the client (SendNUIMessage).
+  window.addEventListener('message', (e) => {
+    const msg = e.data || {};
+    if (msg.action === 'open') { load(msg.appearance); document.body.style.display = 'block'; }
+    else if (msg.action === 'close') { document.body.style.display = 'none'; }
+  });
+</script>
+</body>
+</html>

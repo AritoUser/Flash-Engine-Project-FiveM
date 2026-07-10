@@ -4,10 +4,39 @@ All notable changes to Flash-Engine. Versioning: SemVer for the public `Flash.Sd
 the payload is additionally bound to one FXServer artifact version (FiveM has no
 stable plugin ABI).
 
+> The player-lifecycle work below was **live-verified** end-to-end on 2026-07-10 with a
+> real client on the local FXServer: connect → spawn → `playerReady` → death (with
+> killer/weapon/cause) → server respawn at a hospital spawn point → downed/revive → limbo →
+> reconnect, plus the flash-core/flash-admin selftests (`lifecycle`/`identity`/`queue`) —
+> **and** the full character-creator path (custom adapter: hold → creator scene with live
+> ped preview → save → spawn → returning character skips the creator).
+
+### Fix: position sampler gated by lifecycle state (flash-core, live-test finding)
+- `SamplePosition` now only samples while the player is actually in the world
+  (`playing`/`downed`/`dead`/`limbo`). Before, it sampled the raw join position (~0,0,0)
+  while a custom adapter (character creator) held the spawn — persisting garbage that made
+  the next `flashfw:spawnAt` deliver `hasPos=true` at the null island (spawn under the map).
+  Exactly the class of bug the lifecycle state machine exists to prevent.
+- **Null-island healing** in the spawn reply: a "saved" position at ~(0,0) is always an
+  artifact of the ungated sampler (no legitimate position sits there in the sea) and is
+  treated as "never saved" — existing poisoned rows heal without a DB wipe.
+
+### Charcreator template hardening (live-test findings)
+- NUI callback host now uses `GetParentResourceName()` (correct casing) instead of
+  `location.hostname` (can be lowercased → callbacks silently unrouted for mixed-case
+  resource names like `MyCharcreator`).
+- New characters are placed at a fixed, streamed-in **creation spot** before the creator
+  opens (with a custom adapter nothing has spawned the ped yet — the camera stared into
+  unstreamed nowhere).
+- "Enter world" is double-click-guarded (one spawn per confirm), and a dev command
+  `cc_reset` wipes the caller's saved look (console: `cc_reset <cid>`) so the creator can
+  be re-tested without touching the DB.
+
 ## Compatibility matrix
 
 | Flash release | Flash.Sdk (NuGet) | Core contract | FXServer artifact (Windows) |
 |---|---|---|---|
+| 0.8.0 | 0.8.0 | v15 | **31689** (`06d4d348c`) |
 | 0.7.1 | 0.7.1 | v15 | **31689** (`06d4d348c`) |
 | 0.7.0 | 0.7.0 | **v15** | **31689** (`06d4d348c`) |
 | 0.6.0 | 0.6.0 | v13 | **31689** (`06d4d348c`) |
@@ -25,6 +54,135 @@ Rules:
   fine (the contract only grows by appending).
 - **Payload ↔ artifact:** pinned exactly. A different artifact version needs a payload
   release built for it.
+
+## [0.8.0] — 2026-07-10
+
+The **player lifecycle** release. Finishes the spawn decoupling started in 0.7.1: flash-core now spawns players **entirely
+on its own**, with zero dependency on any other resource. **Managed-only** (client Lua +
+comments): no native change, core contract stays **v15**, artifact pin (**31689**)
+unchanged. Existing servers need no config; the new default reproduces a working spawn out
+of the box without `spawnmanager` *or* `basic-gamemode`.
+
+### Self-contained native spawn is the default (flash-core)
+- New default adapter `spawn_native.lua`: a **fully self-contained** spawn built on pure GTA
+  natives (fade → collision request → `NetworkResurrectLocalPlayer` → place/heading → wait
+  for collision → hand back control → `playerSpawned`). No `exports.spawnmanager`, and it no
+  longer relies on `basic-gamemode` for spawn points — flash-core carries its own default
+  point. `ensure flash-core` alone now puts a player in the world.
+- Default spawn point (fresh character + auto-respawn) is Legion Square, convar-tunable:
+  `flash_spawn_x/y/z/h`, optional `flash_spawn_model`, and `flash_spawn_autorespawn` /
+  `flash_spawn_respawn_delay` for the parity auto-respawn-on-death behaviour (all `setr`,
+  read client-side).
+- Adapter selection via `setr flash_spawn_adapter`: `"native"` (default) · `"spawnmanager"`
+  (the legacy bridge, now **opt-in** — still shipped as `spawn_spawnmanager.lua`) ·
+  `"custom"`/`"none"` (handle `flashfw:spawnAt` yourself). The neutral contract is unchanged.
+
+### New: character-creator template (Flash.Templates)
+- `dotnet new flash-charcreator` scaffolds a full **custom spawn adapter** that shows the
+  `"custom"` case end-to-end: hide the player on join, edit appearance in a self-contained
+  NUI, persist it per character id (`cid`) over flash-core's RPC bridge, then drive
+  `flashfw:requestSpawn` ⇄ `flashfw:spawnAt`. Reference for anyone building character select /
+  custom spawn UIs. Lives in `templates/charcreator-resource/`.
+
+### Player lifecycle — state machine skeleton (flash-core, Slice 1)
+- First slice of the [player-lifecycle design](docs/player-lifecycle.md): a server-authoritative
+  **state machine** (`Lifecycle.cs`) tracking each player as `connecting → spawning → playing →
+  dead → dropped` (full state vocabulary defined; later slices wire the remaining transitions).
+- Neutral, no hard dependency: every transition emits `flashfw:stateChanged(netId, old, new)`
+  and mirrors a snapshot into the player state bag `player.State["flash:lc"]` (`{ state, cid,
+  alive }`). New exports `getState(netId)` and `getSession(netId)` (rich session snapshot).
+- Managed-only: no native change, core contract stays **v15**. Covered headless by the
+  flash-core selftest (`lifecycle=True`).
+
+### Player lifecycle — `playerReady` + apply pipeline (flash-core, Slice 2)
+- New canonical **`flashfw:playerReady(netId, cid)`** — fires when the player is *fully in the
+  world*, i.e. after the ped is placed **and** appearance/loadout were applied. Distinct from
+  the existing `flashfw:playerLoaded` (server data loaded). Modules that touch the ped should
+  wait for `playerReady`. Also fired on `restart flash-core` for already-spawned players.
+- **Apply pipeline** (client, adapter-independent, in `client.lua`): appearance/clothing/loadout
+  resources `registerApplier('tag')` once and `markApplied('tag')` per spawn while listening to
+  `flashfw:applyLook(cid)`. The active adapter calls `awaitApply()` after placing the ped (still
+  faded out); flash-core waits for all registered tags (5 s timeout) then fades in and acks.
+- The `playing` transition now hangs on the real client ack (`flashfw:spawnComplete`) instead of
+  the Slice-1 approximation — idempotent + forgery-safe (only `spawning → playing` fires ready).
+  The built-in adapter and the charcreator template both drive it, so `playerReady` fires
+  identically regardless of spawn adapter. Selftest extended (`lifecycle=True`).
+
+### Player lifecycle — limbo + spawn primitives (flash-core, Slice 3)
+- **Client exports** (adapter-independent, in `client.lua`): `spawn(x, y, z, heading)` — the
+  single canonical placement (fade, collision streaming, resurrect, apply pipeline, fade-in,
+  `playerSpawned`), now shared by `spawn_native.lua` *and* offered to custom adapters;
+  `freezeInLimbo(enable)` — the "hidden + frozen + faded" hold state in one call;
+  `orbitCam(opts)` / `stopCam(cam)` — the creation/intro camera helper.
+- **Spawn holds** (server): `holdSpawn(netId, reason) → token` / `releaseSpawn(netId, token)`.
+  A creator/intro/multichar resource claims the pre-spawn *per player at runtime* — flash-core
+  defers the `flashfw:spawnAt` answer while any hold is outstanding and delivers it when the
+  **last** token is released. No `flash_spawn_adapter` reconfiguration needed for the common case.
+- **Limbo as a real state** (server): `enterLimbo(netId, mode)` / `exitLimbo(netId)` with
+  `flashfw:limboEnter/limboExit` events — spectate/noclip/cutscene share one clean enter/exit
+  (only reachable from `playing`, idempotent-safe). The client act stays with the caller.
+- Charcreator template rebased onto the primitives as living proof: hand-rolled hide/freeze,
+  camera and placement blocks replaced by `freezeInLimbo` / `orbitCam` / `spawn` (~50 lines
+  less). Selftest extended: hold bookkeeping + limbo gate (`lifecycle=True`).
+
+### Player lifecycle — spawn points + death metadata (flash-core, Slice 4)
+- **Named spawn points** (`SpawnPoints.cs`): `registerSpawnPoint(name, x, y, z, heading[, job])`
+  / `unregisterSpawnPoint` / `listSpawnPoints`, used via `spawnAtPoint(netId, name)` (job-gated)
+  or `spawnPlayer(netId, x, y, z, h)`. Server-commanded spawns: callers pick a *name*, never
+  raw client coordinates — closes the "spawn event as free teleport" lane. Both auto-revive a
+  dead player and use the `respawning` state; `flashfw:playerRespawned(netId, cid, point)` fires.
+- **`flashfw:preSpawn(netId, cid)`** fires before the `spawnAt` answer — a synchronous handler
+  can claim the spawn via `holdSpawn` (the Slice-3 hold check runs right after).
+- **Death metadata** (`Death.cs`): `flashfw:playerDied` carries a third argument
+  `{ killer, weapon, cause, x, y, z }`. killer(netId)+weapon come from the death report —
+  `setDead(netId, dead, killer, weapon)`, filled by the gameplay death-wire from the engine's
+  own attribution (`GetPedSourceOfDeath`/`GetPedCauseOfDeath`); flash-core **classifies** cause
+  = player/suicide/npc/environment/unknown. Existing `(netId, cid)` handlers keep working — the
+  extra argument is additive. *(The initial `weaponDamageEvent` parse was replaced after the live
+  test proved `willKill` is always false on the fatal hit and hit-entity resolution unreliable.)*
+- Selftest extended: point validation (job gate/unknown) + death-cause attribution and
+  freshness (`lifecycle=True`).
+
+### Player lifecycle — identity graph & ban-evasion resistance (flash-admin, Slice 5a)
+- **Persistent identity graph** (`Identity.cs`): every allowed connect records the player's
+  identifier keys — which kinds is the **operator's choice** (`flash_identity_collect`,
+  data-minimal default `token,license,fivem`; `off` disables the engine; `steam`/`discord`/`ip`
+  are opt-in). Retention via `flash_identity_retention_days`, erasure via the `purgeIdentity`
+  export — what a server stores about its players is the server operator's decision and
+  responsibility.
+- **Cluster resolution**: identities sharing ≥ `flash_identity_shared_threshold` hardware
+  tokens link (family-PC protection); the same fivem/steam/discord account links with one;
+  **ip never links** (CGNAT). A cluster is the person, not one id.
+- **Cluster bans amplify the existing gate**: `banIdentity` writes ordinary rows into the
+  existing `bans` + `ban_hardware_tokens` tables for every member (no second ban system) and
+  kicks online members. The connect gate additionally rejects when *any* cluster member is
+  actively banned — catching multi-hop evasion beyond the #52 exact-token match.
+- **Owner enrichment hook**: `flash_identity_enrich "resource:export"` — flash-admin calls it
+  with `(name, license, keys)`; a returned string rejects with that reason. Fail-open, keys
+  (Steam API etc.) stay with the owner — same pattern as `flash_anti_vpn_api`.
+- Exports `identityCluster` / `linkedIdentifiers` / `banIdentity` / `purgeIdentity` (targets
+  resolve accountId → netId → license, like the `offline*` commands) + console/superadmin
+  command `identity <target>` for cluster audits. Selftest: link rule (threshold/ip), graph
+  round-trip, cluster ban, purge (`identity=True`). The **queue** (phase 1) remains open.
+
+### Player lifecycle — join queue + downed/bleed-out + respawn policy (Slice 5b / phase 6)
+- **Join queue** (flash-admin `Queue.cs`): when the server is full (`set flash_queue_slots 32`;
+  0 = off), connects are held in their deferral with a live position card. Order: priority
+  first (`queue_priority` table, `setQueuePriority` export, target resolution like `offline*`),
+  FIFO within the same priority. Grants reserve the slot until `playerJoining` confirms (or a
+  60 s reaper frees a crashed loader) — two queued players can't race one slot. Runs **after**
+  all gates (a banned player never waits just to be rejected). Bookkeeping is selftest-covered
+  (`queue=True`); the deferral hold loop itself is client-verification-pending.
+- **Downed / bleed-out** (flash-core): `setDowned(netId, bool)` / `isDowned` / `revive`
+  (clears dead *and* downed) with the `downed` lifecycle state, `flashfw:playerDowned` /
+  `flashfw:playerRevived` events and the replicated `downed` state-bag key. Death supersedes
+  downed; a dead player can't be downed. Optional bleed-out: `set flash_downed_bleedout_s 300`
+  auto-kills a downed player after the window (a revive in time wins). Transient — a relog
+  while downed falls under the existing combat-log guard.
+- **Server respawn policy** (flash-core): `set flash_respawn_point "hospital"` +
+  `flash_respawn_delay_s` auto-respawns dead players at a named spawn point, server-side.
+  Using it? Disable the client auto-respawn (`setr flash_spawn_autorespawn "false"`) — one
+  respawner is enough. Selftest extended (downed gate, `lifecycle=True`).
 
 ## [0.7.1] — 2026-07-07
 
